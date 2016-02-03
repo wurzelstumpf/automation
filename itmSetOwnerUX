@@ -1,0 +1,318 @@
+#!/bin/ksh
+#==============================================================================
+# SYNOPSIS
+#   itmSetOwnerUX [-V]
+#
+# DESCRIPTION
+#   This is a shell script designed to be run immediately following a successful
+#   remote deployment of an ITM Linux (LZ) or Unix (UX) Operating System agent.
+#
+#   The script should be run directly after a fresh ITM OS agent installation.
+#   It's purpose is to configure the OS Agent to run as a non-root user.
+#
+#   It essentially performs the following actions:
+#
+#      Stops the OS agent
+#      Recursively changes the ownerships of the itm install directory
+#      Runs secureMain
+#      Runs SetPerm
+#      Changes ownerships and permissions on any lost+found directories
+#      Executes UpdateAutoRun.sh the itm boot script does not exist
+#      Changes ownerships of itm boot script
+#      Modifies the boot script so the os agent is started as a non-root user
+#      Moves the entry that starts the itm agent to the end of /etc/inittab on AIX
+#      Starts the OS agent as a non-root user
+#
+# OPTIONS
+#   -V
+#            Print the version of the script and exit
+#
+# SUPPORTS
+#   AIX, SunOS and Linux 
+#
+# LICENSE
+#   Copyright (C) 2006-2010 Mark Matthews
+#   Distributed under the terms of the GNU General Public License
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#    
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#    
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# SEE ALSO 
+#   itmCreateNodeUX, itmCreateNodeNT
+#
+#------------------------------------------------------------------------------
+#==============================================================================
+# Global Variables
+#
+VERSION="1.3"
+
+ITMINST="/opt/IBM/ITM"
+ITMBIN="${ITMINST}/bin"
+ITMBASE="`dirname $ITMINST`"
+ITMDIR="`basename $ITMINST`"
+
+ITM_GROUP=itm
+ITM_OWNER=itmexe
+
+ITM_INIT='rcitm1:2:wait:/etc/rc.itm1 > /dev/console 2>&1'
+ITM_PERMS=755
+
+LOST_OWNER=root
+LOST_PERMS=755
+
+HOST="`uname -n | cut -f1 -d '.'`"
+
+PLATFORM="`uname`"           # Script supports AIX, SunOS and Linux platforms
+
+# NOTE:  This script should not be run on TEMS and TEPS servers
+#        maintain the following list to prevent this from happening
+#
+ITM_SERVERS="
+  dvaaixesm01 \
+  dvaaixesm02 \
+  dhaaixesm01 \
+  dhaaixesm02 \
+  dklesm01    \
+  dklesm02    \
+  dhaaixdmz01 \
+  dhaaixdmz02 \
+  tdcesm01    \
+  tdcesm02    \
+  tdcesm03    \
+  tdcesm04    \
+  tdcesm05    \
+  ddcesm01    \
+  ddcesm02    \
+  ddcesm03    \
+  ddcesm04    \
+  ddcesm05    \
+  tnesm01e    \
+  dkesm02e    \
+  tnesm03i    \
+  dkesm04i    \
+  "
+
+#------------------------------------------------------------------------------
+#==============================================================================
+# Functions
+#
+usage ()
+{
+  cat <<EOF
+
+USAGE: itmSetOwnerUX [-V]
+
+EOF
+
+  exit 2
+}
+
+msg ()
+{
+  echo ..... "$@" 
+}
+
+run ()
+{
+  echo ..... "$@" && "$@"
+}
+
+err ()
+{
+  echo ERROR: $* && exit 1
+}
+
+check_itm_server ()
+{
+  echo ${ITM_SERVERS} | grep " ${HOST} " >/dev/null 2>&1
+
+  [ $? == 0 ] && err "This script should not be run on ITM Server: ${HOST}"
+}
+
+#------------------------------------------------------------------------------
+#==============================================================================
+# Command line options
+#
+while getopts V opt
+do
+  case $opt in
+    V)
+      echo "Version: ${VERSION}"
+      exit 0
+      ;;
+    ?)
+      usage
+      ;;
+  esac
+done
+
+shift $(($OPTIND -1))
+#printf "Remaining arguments are: %s\n" "$*"
+
+#------------------------------------------------------------------------------
+#==============================================================================
+# Sanity checking
+
+case "${PLATFORM}" in
+AIX*)
+  ITM_BOOT="/etc/rc.itm1"
+  LOST_GROUP=system
+  OS_AGENT="ux"
+  ;;
+SunOS*)
+  ITM_BOOT="/etc/init.d/ITMAgents1"
+  LOST_GROUP=root
+  OS_AGENT="ux"
+  ;;
+Linux*)
+  ITM_BOOT="/etc/rc.d/init.d/ITMAgents1"
+  LOST_GROUP=root
+  OS_AGENT="lz"
+  ;;
+*)
+  err "Unsupported platform: `uname`"
+  ;;
+esac
+
+case "`id`" in
+uid=0*)
+  :
+  ;;
+*)
+  err "Must be root to be able to run this script"
+  ;;
+esac
+
+[ -d "${ITMBIN}" ] || err "Directory does not exist: $ITMBIN"
+
+egrep "^${ITM_GROUP}:" /etc/group > /dev/null 2>&1
+
+[ $? == 0 ] || err "ITM Group does not exist in /etc/group: ${ITM_GROUP}"
+
+egrep "^${ITM_OWNER}:" /etc/passwd > /dev/null 2>&1
+
+[ $? == 0 ] || err "ITM Owner does not exist in /etc/passwd: ${ITM_OWNER}"
+
+egrep "^${LOST_GROUP}:" /etc/group > /dev/null 2>&1
+
+[ $? == 0 ] || err "LOST Group does not exist in /etc/group: ${LOST_GROUP}"
+
+egrep "^${LOST_OWNER}:" /etc/passwd > /dev/null 2>&1
+
+[ $? == 0 ] || err "LOST Owner does not exist in /etc/passwd: ${LOST_OWNER}"
+
+check_itm_server
+
+#------------------------------------------------------------------------------
+#==============================================================================
+# Main
+#
+#
+if [ ! -f "${ITM_BOOT}" ] ; then
+  msg "Boot script ${ITM_BOOT} does not exist so executing UpdateAutoRun.sh"
+  run /opt/IBM/ITM/bin/UpdateAutoRun.sh
+fi
+
+run "${ITMBIN}/itmcmd" agent stop "${OS_AGENT}"
+
+msg cd "${ITMBASE}"
+
+cd "${ITMBASE}" || err "Unable to change directory to: ${ITMBASE}"
+
+[ -d "${ITMDIR}" ] || err "Directory does not exist: ${ITMDIR}"
+
+run chown -Rh "${ITM_OWNER}:${ITM_GROUP}" "${ITMDIR}"
+
+run "${ITMBIN}/secureMain" -h "${ITMINST}" -g "${ITM_GROUP}" lock
+
+run "${ITMBIN}/SetPerm" -h "${ITMINST}" -a
+
+case ${PLATFORM} in
+AIX*)
+  # NOTE
+  #  The SetPerm script in ITM 6.1 Fix Pack 0006 appears to miss setting the
+  #  correct group ownership on 64 bit aix platforms (and possibly also 32 bit platforms).
+  #  This workaround sets both ownerships and permissions explicitly.  The ownerships
+  #  and permissions should be something like:
+  #
+  #    rwxr-sr-x 1 itmexe system 165014 Jul 26 2007 /opt/IBM/ITM/aix513/ux/bin/stat_daemon
+  #    rwxr-sr-x 1 itmexe system 165014 Jul 26 2007 /opt/IBM/ITM/aix516/ux/bin/stat_daemon
+  #
+  #  
+  STAT_DAEMON="${ITMINST}/aix513/ux/bin/stat_daemon \
+               ${ITMINST}/aix516/ux/bin/stat_daemon "
+             
+  for i in ${STAT_DAEMON} ; do
+    if [ -f "${i}" ] ; then
+      msg "Applying workaround for SetPerm defect first noticed in ITM 6.1 FP006"
+      run chown "${ITM_OWNER}:system" "${i}"
+      run chmod 2755 "${i}"
+    fi
+  done
+  ;;
+esac 
+
+run find "${ITMDIR}" -type d -name "lost+found" -exec chown "${LOST_OWNER}:${LOST_GROUP}" {} \;
+run find "${ITMDIR}" -type d -name "lost+found" -exec chmod "${LOST_PERMS}" {} \;
+run find "${ITMDIR}" -type d -name "lost+found" -ls
+
+msg "Updating boot script so that agent will be run as ${ITM_OWNER}"
+
+sed -e "s/root/${ITM_OWNER}/" < "${ITM_BOOT}" > "${ITM_BOOT}.itmSetOwnerUX"
+
+run mv "${ITM_BOOT}.itmSetOwnerUX" "${ITM_BOOT}"
+
+run chmod "${ITM_PERMS}" "${ITM_BOOT}"
+
+run chown "${ITM_OWNER}:${ITM_GROUP}" "${ITM_BOOT}"
+
+case ${PLATFORM} in
+AIX*)
+  run rmitab "`echo ${ITM_INIT} | cut -f 1 -d : `"
+  run mkitab "${ITM_INIT}"
+  ;;
+esac
+
+# Touch up any missed ownership changes
+#
+ITM_MISSED_OWNERS="/opt/IBM/ITM/tmaitm6/links \
+                   /opt/IBM/ITM/tmaitm6/links/aix51 \
+                   /opt/IBM/ITM/tmaitm6/links/aix51/lib \
+                   /opt/IBM/ITM/tmaitm6/links/aix51x6 \
+                   /opt/IBM/ITM/tmaitm6/links/aix51x6/lib \
+                   /opt/IBM/ITM/tmaitm6/links/aix52 \
+                   /opt/IBM/ITM/tmaitm6/links/aix52/lib \
+                   /opt/IBM/ITM/tmaitm6/links/aix52x6 \
+                   /opt/IBM/ITM/tmaitm6/links/aix52x6/lib \
+                   /opt/IBM/ITM/registry/SecureMode \
+                  "
+                   
+for j in ${ITM_MISSED_OWNERS} ; do
+  if [ -e "${j}" ] ; then
+      run chown -h ${ITM_OWNER}:${ITM_GROUP} ${j}
+  fi
+done
+
+echo
+msg "Listing files not owned by ${ITM_OWNER} or ${ITM_GROUP}"
+run find ${ITMDIR} ! -user ${ITM_OWNER} -ls
+echo
+msg "Listing files not group owned by ${ITM_GROUP}"
+run find ${ITMDIR} ! -group ${ITM_GROUP} -ls
+echo
+
+run su - "${ITM_OWNER}" -c "${ITMINST}/bin/itmcmd agent start ${OS_AGENT}"
+#------------------------------------------------------------------------------
+#==============================================================================
+#
+#------------------------------------------------------------------------------

@@ -1,0 +1,27 @@
+# .gitignore
+#
+# Ignore all
+*
+
+# But not
+!.gitignore
+
+# And not
+!License
+!chapi
+!mello
+!mepau
+!merci
+!mevro
+!itmCleanUX
+!itmCreateNodeUX
+!itmCreateNodeNT
+!itmSetOwnerUX
+!itmSetSit
+
+# And not markdown
+!*.md
+
+# And not directories
+!*/
+

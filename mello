@@ -1,0 +1,510 @@
+#!/usr/bin/perl
+#==============================================================================
+# NOTE:  To view documentation run script with the "--pod" option or
+#        do it yourself by running "perldoc 'path_to_this_script'"
+#
+# LICENSE
+#   Copyright (C) 2006-2010 Mark Matthews
+#   Distributed under the terms of the GNU General Public License
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#    
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#    
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#    
+#------------------------------------------------------------------------------
+#==============================================================================
+# Modules
+#
+use Getopt::Long;
+#------------------------------------------------------------------------------
+#==============================================================================
+# Globals
+#
+$main::VERSION =  substr('$Revision: 1.2 $', 11, -2);
+$synopsis = <<"EOS";
+
+  mello {--pod|--help|--version}
+
+  mello [options]
+  
+    Where options may be:
+      --file path
+      --output attrib,...
+      --select attrib=string
+      --delimiter string
+      --header
+      --noheader
+      --case
+      --nocase
+      --strip-quotes
+      --nostrip-quotes
+      --time
+      --notime
+
+EOS
+
+$| = 1;                          # Flush io buffer after each read or write
+#------------------------------------------------------------------------------
+#==============================================================================
+# Process command line arguments
+#
+$opt_pod = 0;
+$opt_help = 0;
+$opt_version = 0;
+$opt_file = ''; 
+@opt_output = ();
+@opt_select = ();
+$opt_delimiter = ',';           # Default is comma
+$opt_header = 0;
+$opt_case = 0;
+$opt_strip_quotes = 1;
+$opt_time = 0;
+
+&usage unless GetOptions(
+                                        "file=s", \$opt_file,
+                                      "output=s", \@opt_output,
+                                      "select=s", \@opt_select,
+                                   "delimiter=s", \$opt_delimiter,
+                                       "header!", \$opt_header,
+                                         "case!", \$opt_case,
+                                 "strip-quotes!", \$opt_strip_quotes,
+                                         "time!", \$opt_time,
+                                           "pod", \$opt_pod,
+                                        "help|?", \$opt_help,
+                                     "version|V", \$opt_version,
+                         );
+
+if ($opt_help)
+{
+  print $synopsis;
+  exit (0);
+}
+
+if ($opt_pod)
+{
+  exit(system("perldoc", "-t", $0));
+}
+
+if ($opt_version)
+{
+  print "(", $0, ")", " ", $main::VERSION, "\n";
+  exit (0);
+}
+
+@opt_output = split(',',join(',',@opt_output));
+
+@opt_output = ('reception_date', 'class', 'severity', 'hostname', 'msg') unless ($#opt_output > -1);
+#------------------------------------------------------------------------------
+#==============================================================================
+# Main  
+#
+$opt_file = "wtdumprl |" unless ($opt_file);
+
+open (EV, $opt_file) or die "Unable to read from: '$opt_file':$!\n";
+
+print join($opt_delimiter, @opt_output), "\n" if ($opt_header);
+
+while ($href = &ev_get(\*EV))
+{
+  &ev_proc($href);
+}
+
+close (EV);
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: ev_get
+#
+#     Args: reference_to_open_filehandle
+#
+#  Returns: If successful, returns a reference to a hash keyed by attribute
+#           name, otherwise it returns zero (0).
+#
+#    Notes: At each invocation the function reads one event from the open
+#           file stream.  This allows large files to be processed without
+#           having to load the entire file into memory before processing.
+#
+#           Two special attribute keys are created.  One called
+#           "reception_date" to hold the reception date and another called
+#           "class" to hold the value of the class name.
+#
+#           Assumes that the format of each event read from the filehandle
+#           corresponds to output by the command "wtdumprl" whereby each
+#           event begins with a reception date and is delineated by the
+#           ### EVENT ### and ### END EVENT ### strings:
+#
+#             1~100793~65537~1145321062(Apr 18 10:44:22 2006)
+#             ### EVENT ###
+#             TMW_Clearing;modelname="TMW_MemoryModel";profilename="aps.xxstmr02.hat.itm.win2003.prod.prf#hic";
+#             event_key="Process=RaidServ;IDProcess= 1544.0000;";eventid="813253218";severity="HARMLESS";
+#             application_class="";application_label="";application_oid="";application_version="";
+#             enterprisename="";eventname="TMW_MemoryLeakInPB";name="";slotkey="Process=RaidServ;
+#             IDProcess= 1544.0000;";state="";hostname="desatp02";adapter_host="desatp02";
+#             origin="15.220.1.10";fqhostname="desatp02";date="04/18/2006 10:56:22";
+#             msg="The problem described by 'TMW_MemoryLeakInPB' no longer exists.";END
+#
+#             ### END EVENT ###
+#             PROCESSED
+#           
+#
+sub ev_get()
+{
+  my ($fh) = shift;
+  my (%ev) = {};
+  my ($event) = "";
+  my ($endEvent) = 0;
+
+  local ($_);                    # Temporarily replace global $_
+
+  while (<$fh>)
+  {
+    s/^\s*(.*?)\s*$/$1/;         # Trim white space front and back
+    next if /^\s*$/;             # Skip empty lines
+
+
+    if (/^\d+~\d+~\d+~(\d+)/)        # Reception date string
+    {
+      $ev{'reception_date'} = $1;    # Number of seconds since epoch
+      next;
+    }
+
+    next if (/^\#\#\# EVENT \#\#\#/);       # Skip this line
+
+    $event .= $_;                           # Gather event lines together
+
+    if (/^\#\#\# END EVENT \#\#\#/)
+    {
+      my ($class) = 1;
+
+      $endEvent = 1;                        # End event
+
+      for $attr (split(';', $event))        # Process event attributes
+
+#      for $attr (split(';(.+?)=', $event))        # Process event attributes
+      {
+        if ($class)                         # Set pseudo attribute class
+        {
+          $ev{'class'} = $attr;
+          $class = 0;
+          next;
+        }
+
+        my ($key, $value) = split('=', $attr);
+        &trim ($key, $value);
+
+        if ($opt_strip_quotes)
+        {
+          if ($value =~ /^\"(.*?)\"$/)
+          {
+            $value = $1;
+          }
+        }
+        
+        $ev{$key} = $value;
+      }
+      next;                                 # Get processing status
+    }
+
+    if ($endEvent)
+    {
+      $ev{'processing_status'} = $_;        # Set processing status
+      return \%ev ;
+    }
+  }
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: ev_proc
+#     Args: hash_reference
+#  Globals: $opt_delimiter, $opt_output, $opt_delimiter, $opt_select
+#  Purpose: Process event according to command line options
+#           
+sub ev_proc()
+{
+  my ($href) = shift;
+
+  local ($_);                      # Temporarily replace global $_
+
+  if ($#opt_select > -1)
+  {
+    my ($matched) = 0;
+
+    for (@opt_select)
+    {
+      my ($key, $val) = split('=', $_, 2);   # Select options look like: "key=value"
+
+      if (exists ${$href}{$key})   # Only consider events with the select attribute
+      {
+        if ($opt_case)
+        {
+          $matched++ if (${$href}{$key} =~ /$val/);     # Case sensitive regex match
+        }
+        else
+        {
+          $matched++ if (${$href}{$key} =~ /$val/i);     # Case insensitive regex match
+        }
+          
+      }
+    }
+    return unless ($matched == ($#opt_select + 1));   # All select options must match
+  }
+
+  my ($print) = 0;      # Boolean to decide whether to print or not
+
+  my ($event) = '';     # Variable to hold event to be printed     
+
+  for (my($i) = 0; $i <= $#opt_output; $i++)
+  {
+    if ($opt_output[$i] eq 'reception_date' and not $opt_time)
+    {
+      my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(${$href}{$opt_output[$i]});
+
+      $year += 1900;      # Convert to four digit year
+      $mon += 1;          # Convert from range 0 .. 11 to range 1 ..12
+
+      $event .= sprintf("%04d-%02d-%02d %02d:%02d:%02d", $year, $mon, $mday, $hour, $min, $sec);
+    }
+    else
+    {
+      $event .= ${$href}{$opt_output[$i]};                # Add attribute to event
+    }
+
+    $event .= $opt_delimiter if ($i != $#opt_output);   # No delimiter after last attribute
+  }
+
+  print $event, "\n";
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: usage
+#  Globals: $synopsis
+#  Returns: 2
+#
+sub usage()
+{
+  my $msg = shift;
+  print STDERR "\nUSAGE: ";
+  print STDERR $msg if ($msg);
+  print STDERR "\n";
+  print STDERR $synopsis;
+  exit(2);
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: trim
+# Synopsis: trim white space front and back
+#  Globals: 
+#  
+sub trim()
+{
+  local ($_);
+
+  for (@_)
+  {
+    s/^\s*(.*?)\s*$/$1/;
+  }
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+#------------------------------------------------------------------------------
+
+__END__
+
+=head1 NAME
+
+  mello - Mark's tec Event Log prOcessor
+
+=head1 SYNOPSIS
+
+  mello {--pod|--help|--version}
+
+  mello --file path
+        --select attrib=string
+        --output attrib,...
+        --delimiter string
+        --header
+        --noheader
+        --case
+        --nocase
+        --strip-quotes
+        --nostrip-quotes
+        --time
+        --notime
+
+=head1 DESCRIPTION
+
+  This script processes Tivoli Enterprise Console (TEC) events dumped
+  from the event log using the command "wtdumprl".
+
+  By default, the output of "wtdumprl" is processed and the "reception
+  date", "class", and value of the "severity", "hostname", and "msg"
+  attributes of each event are printed to standard out.
+
+  A different set of attributes may be printed by specifing the
+  "--output" option.  
+
+  Each printed attribute is separated by a delimiter to facilitate
+  import into third party spreadsheets and/or databases.  By default
+  the delimiter is a comma, however any string may be specified by
+  using the "--delimiter" option.
+
+  The set of events to be considered for output can be limited by
+  using one or more "--select" options.  The value of any event
+  attribute can be used as an argument to this option.
+
+  The pseudo attributes, class, reception_date and processing_status
+  can be used to select the event's class name, date it was received
+  and written to the reception log as well as it's current processing
+  status within the tec.
+
+  Note that if the "--select" option is used then all the specified
+  attributes must exist for an event to be considered for printing.
+  Events lacking one or more of the specified attributes are not
+  printed.
+
+=head1 OPTIONS
+
+=over
+
+=item  --pod
+
+  Execute "perldoc" to print out this documentation.
+
+=item  --help
+
+  Print a short synopsis of options
+
+=item  --version
+
+  Print script version and exit.
+
+=item  --file path
+
+  Path to the file containing the output of the "wtdumprl" command.
+  If the path is a lone dash "-" then the script reads from standard
+  input.  By default the script executes and processes the output of
+  the command "wtdumprl".
+
+=item --select attrib=string
+
+  Select events which have a matching value for the specified
+  attribute.  The pseudo attribute "class" may be used to select the
+  class name.  The string may be any valid perl regular expression.
+  Multiple select options may be provided on the command line.  They
+  must all match for an event to be output.
+
+  NOTE:  Beware of shells that interpret '*', '?' and '\' chars
+         before feeding the arguments to this script.  If in doubt
+         always use 'quotes' and remember some shells interpret
+         the '\' character inside single 'quotes' so you will need
+         to do something like '\\w' in order to preserve them.
+
+=item  --output attrib,...
+
+  This option overrides the attribute values to be output.  By default
+  the value of the date, status, class, severity, hostname and msg
+  attributes are printed to standard output.  The pseudo attributes
+  "class" and "reception_date" may be used to select the class name
+  and date of reception.
+
+=item  --delimiter string
+
+  When listing an event, separate items by the specified string
+  delimiter.  The default is a comma (,).
+
+=item  --header
+
+  The first line output will consist of the attribute column names
+  separated by the delimiter string.
+
+=item  --noheader
+
+  Do not output a first line consist of the attribute column names
+  separated by the delimiter string.  This is the default.
+
+=item  --case
+
+  Use case sensitive matching when comparing attribute values.
+
+=item  --nocase
+
+  Do not use case sensitive matching when comparing attribute values.
+  This is the default.
+
+=item  --strip-quotes
+
+  Remove quotes ("") surrounding output attributes. This is
+  the default.
+
+=item  --nostrip-quotes
+
+  Don't remove quotes ("") surrounding output attributes.
+
+=item  --time
+
+  Output the reception_date pseudo attribute as an integer
+  representing the number of seconds since epoch.
+
+=item  --notime
+
+  Output the reception_date pseudo attribute as an iso
+  standard time string.  This is the default.
+
+=back
+
+=head1 TUTORIAL
+
+  Print the reception_date, class, source, severity, hostname and
+  msg of each event in the TEC reception log:
+
+    mello
+
+  Print out all currently harmless events
+
+    mello --select severity=harmless
+
+  Count number of received critical events from all systems whose
+  hostnames start with xxs
+
+    mello --select severity=critical --select hostname='^xxs.*' | wc -l
+
+  Process events previously dumped to the file "events.out":
+
+    mello --file events.out 
+
+  List all Tmw2k events sorted by eventid.  This allows the time (in
+  seconds since epoch) between the original event and it's
+  corresponding clearing event to be compared.  The options to the
+  sort command vary depending on the type of unix (solaris, linux,
+  aix, ....). The options below correspond to the sort command found
+  on linux systems:
+
+    ./mello --time --select eventid='.*' \
+            --output reception_date,eventid,class,severity,msg \
+        | sort -n -k 2 -t,
+  
+=head1 SEE ALSO
+
+  perl, wtdumprl
+
+=head1 TODO
+
+  Sure to be something down the track
+  
+=head1 AUTHOR
+
+  Mark Matthews
+
+=head1 RCS ID
+  
+  $Id: mello,v 1.2 2006/07/31 06:23:19 matthews Exp $
+
+=cut

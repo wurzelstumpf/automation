@@ -1,0 +1,429 @@
+#!/usr/bin/perl
+#==============================================================================
+# NOTE:  To view documentation run script with the "--pod" option or
+#        do it yourself by running "perldoc 'path_to_this_script'"
+#
+# LICENSE
+#   Copyright (C) 2006-2010 Mark Matthews
+#   Distributed under the terms of the GNU General Public License
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#    
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#    
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#------------------------------------------------------------------------------
+#==============================================================================
+# Modules
+#
+use Getopt::Long;
+#------------------------------------------------------------------------------
+#==============================================================================
+# Globals
+#
+$main::VERSION =  substr('$Revision: 1.2 $', 11, -2);
+$synopsis = <<"EOS";
+
+  mevro {--pod|--help|--version}
+
+  mevro [options]
+  
+    Where options may be:
+      --file path
+      --output attrib,...
+      --select attrib=string
+      --delimiter string
+      --header
+      --noheader
+      --case
+      --nocase
+
+EOS
+
+$| = 1;                          # Flush io buffer after each read or write
+#------------------------------------------------------------------------------
+#==============================================================================
+# Process command line arguments
+#
+$opt_pod = 0;
+$opt_help = 0;
+$opt_version = 0;
+$opt_file = ''; 
+@opt_output = ();
+@opt_select = ();
+$opt_delimiter = ',';           # Default is comma
+$opt_header = 0;
+$opt_case = 0;
+
+&usage unless GetOptions(
+                                        "file=s", \$opt_file,
+                                      "output=s", \@opt_output,
+                                      "select=s", \@opt_select,
+                                   "delimiter=s", \$opt_delimiter,
+                                       "header!", \$opt_header,
+                                         "case!", \$opt_case,
+                                           "pod", \$opt_pod,
+                                        "help|?", \$opt_help,
+                                     "version|V", \$opt_version,
+                         );
+
+if ($opt_help)
+{
+  print $synopsis;
+  exit (0);
+}
+
+if ($opt_pod)
+{
+  exit(system("perldoc", "-t", $0));
+}
+
+if ($opt_version)
+{
+  print "(", $0, ")", " ", $main::VERSION, "\n";
+  exit (0);
+}
+
+@opt_output = split(',',join(',',@opt_output));
+
+@opt_output = ('date', 'status', 'severity', 'hostname', 'class', 'msg') unless ($#opt_output > -1);
+#------------------------------------------------------------------------------
+#==============================================================================
+# Main  
+#
+$opt_file = "wtdumper -d |" unless ($opt_file);
+
+open (EV, $opt_file) or die "Unable to read from: '$opt_file':$!\n";
+
+print join($opt_delimiter, @opt_output), "\n" if ($opt_header);
+
+while ($href = &ev_get(\*EV))
+{
+  &ev_proc($href);
+}
+
+close (EV);
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: ev_get
+#
+#     Args: reference_to_open_filehandle
+#
+#  Returns: If successful, returns a reference to a hash keyed by attribute
+#           name, otherwise it returns zero (0).
+#
+#    Notes: At each invocation the function reads one event from the open
+#           file stream.  This allows large files to be processed without
+#           having to load the entire file into memory before processing.
+#
+#           A special attribute key called "class" is created to hold the
+#           value of the class name.
+#
+#           Assumes that the format of each event read from the filehandle
+#           corresponds to output by the command "wtdumper -d" whereby each
+#           event is delineated by the class name and "END" character
+#           sequences, each at the start of a line:
+#
+#           TMW_HighPaging;
+#                   server_handle=1;
+#                   date_reception=1123547736;
+#                   event_handle=1;
+#                   source=TMNT;
+#                   sub_source=HIC_HELPDESK_CLMCR;
+#                   origin=0.0.0.0;
+#                   sub_origin=HIC-;
+#                   hostname=anatwp02;
+#                   status=CLOSED;
+#                   administrator='closed by local_send.rls';
+#                   acl=[ admin];
+#                   severity=WARNING;
+#                   date='08/09/2005 10:35:31';
+#                   duration=0;
+#                   msg='The paging rate (       431 pages per second) is too high.';
+#                   msg_catalog=none;
+#                   msg_index=0;
+#                   num_actions=0;
+#                   credibility=1;
+#           END
+#
+#           
+#
+sub ev_get()
+{
+  my ($fh) = shift;
+  my (%ev) = {};
+  my ($attr) = "";
+  my ($attrSpansLines) = 0;
+
+  local ($_);                    # Temporarily replace global $_
+
+  while (<$fh>)
+  {
+    s/^\s*(.*?)\s*$/$1/;         # Trim white space front and back
+    next if /^\s*$/;             # Skip empty lines
+    return \%ev if /^END$/;      # Event terminator
+
+    if ($attrSpansLines)
+    {
+      $attr .= " " . $_ ;        # Add to previously read line
+    }
+    else
+    {
+      $attr = $_;
+    }
+
+    my ($lch) = chop $attr;      # Get last character
+
+    if ($lch ne ';')             # No terminating semicolon so keep reading lines
+    {
+      $attrSpansLines++;
+      next;
+    }
+
+    $attrSpansLines = 0;         # Found terminating semicolon
+
+    my($key, $val) = split('=', $attr, 2);
+
+    $val =~ s:^\'(.*)\'$:$1:;    # Remove any leading and trailing quotes
+
+    if (not defined $val)        # This must be the class name
+    {
+      $ev{'class'} = $key;       # Add pseudo attribute class to the hash
+      next;
+    }
+
+    $ev{$key} = $val;            # Set value/attribute pair
+  }
+
+  return 0;            # Nothing left to read or event not terminated by 'END'
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: ev_proc
+#     Args: hash_reference
+#  Globals: $opt_delimiter, $opt_output, $opt_delimiter, $opt_select
+#  Purpose: Process event according to command line options
+#           
+sub ev_proc()
+{
+  my ($href) = shift;
+
+  local ($_);                      # Temporarily replace global $_
+
+  if ($#opt_select > -1)
+  {
+    my ($matched) = 0;
+
+    for (@opt_select)
+    {
+      my ($key, $val) = split('=', $_, 2);   # Select options look like: "key=value"
+
+      if (exists ${$href}{$key})   # Only consider events with the select attribute
+      {
+        if ($opt_case)
+        {
+          $matched++ if (${$href}{$key} =~ /$val/);     # Case sensitive regex match
+        }
+        else
+        {
+          $matched++ if (${$href}{$key} =~ /$val/i);     # Case insensitive regex match
+        }
+          
+      }
+    }
+    return unless ($matched == ($#opt_select + 1));   # All select options must match
+  }
+
+  my ($print) = 0;      # Boolean to decide whether to print or not
+
+  my ($event) = '';     # Variable to hold event to be printed     
+
+  for (my($i) = 0; $i <= $#opt_output; $i++)
+  {
+    $print++ if (exists ${$href}{$opt_output[$i]});     # Does attribute exist
+
+    $event .= ${$href}{$opt_output[$i]};                # Add attribute to event
+
+    $event .= $opt_delimiter if ($i != $#opt_output);   # No delimiter after last attribute
+  }
+  print $event, "\n" if ($print == ($#opt_output + 1)); # Print if all attributes exist
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: usage
+#  Globals: $synopsis
+#  Returns: 2
+#
+sub usage()
+{
+  my $msg = shift;
+  print STDERR "\nUSAGE: ";
+  print STDERR $msg if ($msg);
+  print STDERR "\n";
+  print STDERR $synopsis;
+  exit(2);
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+#------------------------------------------------------------------------------
+
+__END__
+
+=head1 NAME
+
+  mevro - Mark's tec EVent Repository prOcessor
+
+=head1 SYNOPSIS
+
+  mevro {--pod|--help|--version}
+
+  mevro --file path
+        --select attrib=string
+        --output attrib,...
+        --delimiter string
+        --header
+        --noheader
+        --case
+        --nocase
+
+=head1 DESCRIPTION
+
+  This script processes Tivoli Enterprise Console (TEC) events dumped
+  from the event repository using the command "wtdumper -d".
+
+  By default, the script processes the output of "wtdumper -d" and
+  prints the value of the "date", "status", "severity", "hostname",
+  "class" and "msg" attributes of each event to standard out.
+
+  A different set of attributes may be printed by specifing the
+  "--output" option.  All the specified attributes must exist for an
+  event to be printed.  Events missing one or more of the attributes
+  listed by this option are not printed.
+
+  Each printed attribute is separated by a delimiter to facilitate
+  import into third party spreadsheets and/or databases.  By default
+  the delimiter is a comma, however any string may be specified by
+  using the "--delimiter" option.
+
+  The set of events to be considered for output can be limited by
+  using one or more "--select" options.  The value of any event
+  attribute can be used as an argument to this option.
+
+=head1 OPTIONS
+
+=over
+
+=item  --pod
+
+  Execute "perldoc" to print out this documentation.
+
+=item  --help
+
+  Print a short synopsis of options
+
+=item  --version
+
+  Print script version and exit.
+
+=item  --file path
+
+  Path to the file containing the output of the "wtdumper -d" command.
+  If the path is a lone dash "-" then the script reads from standard
+  input.  By default the script executes and processes the output of
+  the command "wtdumper -d".
+
+=item --select attrib=string
+
+  Select events which have a matching value for the specified
+  attribute.  The pseudo attribute "class" may be used to select the
+  class name.  The string may be any valid perl regular expression.
+  Multiple select options may be provided on the command line.  They
+  must all match for an event to be output.
+
+  NOTE:  Beware of shells that interpret '*', '?' and '\' chars
+         before feeding the arguments to this script.  If in doubt
+         always use 'quotes' and remember some shells interpret
+         the '\' character inside single 'quotes' so you will need
+         to do something like '\\w' in order to preserve them.
+
+=item  --output attrib,...
+
+  This option overrides the attribute values to be output.  By default
+  the value of the date, status, class, severity, hostname and msg
+  attributes are printed to standard output.  The pseudo attribute
+  "class" may be used to select the class name.
+
+=item  --delimiter string
+
+  When listing an event, separate items by the specified string
+  delimiter.  The default is a comma (,).
+
+=item  --header
+
+  The first line output will consist of the attribute column names
+  separated by the delimiter string.
+
+=item  --noheader
+
+  Do not output a first line consist of the attribute column names
+  separated by the delimiter string.  This is the default.
+
+=item  --case
+
+  Use case sensitive matching when comparing attribute values.
+
+=item  --nocase
+
+  Do not use case sensitive matching when comparing attribute values.
+  This is the default.
+
+
+=back
+
+=head1 TUTORIAL
+
+  Print the value of the date, status, class, severity, hostname and
+  msg attributes of each event in the TEC event repository:
+
+    mevro
+
+  Print out all currently open events:
+
+    mevro --select status=open
+
+  Count number of currently open events:
+
+    mevro --select status=open | wc -l
+
+  List all open events from the hic customer:
+
+    mevro --select status=open --select customer=hic
+
+  Process events previously dumped to the file "events.out":
+
+    mevro --file events.out 
+
+=head1 SEE ALSO
+
+  perl, wtdumper
+
+=head1 TODO
+
+  Sure to be something down the track
+  
+=head1 AUTHOR
+
+  Mark Matthews
+
+=head1 RCS ID
+  
+  $Id: mevro,v 1.2 2006/07/31 06:23:56 matthews Exp $
+
+=cut

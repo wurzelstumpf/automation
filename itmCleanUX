@@ -1,0 +1,306 @@
+#!/bin/ksh
+#==============================================================================
+# SYNOPSIS
+#   itmCleanUX [-V] [-t]
+#
+# DESCRIPTION
+#   This is a shell script designed to prepare a system for the pristine
+#   installation of an ITM Operating System Agent.
+#
+#   The script must be run as root and it essentially performs the
+#   following actions:
+#
+#      Stops the OS agent
+#      Removes boot script(s)
+#      Removes installation directory
+#
+# OPTIONS
+#   -V
+#            Print the version of the script and exit
+#
+#   -t
+#            Temporarily change root password
+#
+# SUPPORTS
+#   AIX
+#
+# LICENSE
+#   Copyright (C) 2006-2010 Mark Matthews
+#   Distributed under the terms of the GNU General Public License
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#    
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#    
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# SEE ALSO 
+#   itmCreateNodeUX, itmCreateNodeNT, itmSetOwnerUX
+#------------------------------------------------------------------------------
+#==============================================================================
+# Global Variables
+#
+VERSION="1.3"
+
+TEMP_SET_ROOT_PASSWORD="no"
+
+ITMINST="/opt/IBM/ITM"
+ITMBIN="${ITMINST}/bin"
+ITMBASE="`dirname $ITMINST`"
+ITMDIR="`basename $ITMINST`"
+
+ITM_GROUP=itm
+ITM_OWNER=itmexe
+
+ITM_INIT='rcitm1:2:wait:/etc/rc.itm1 > /dev/console 2>&1'
+ITM_PERMS=755
+
+LOST_OWNER=root
+LOST_PERMS=755
+
+HOST="`uname -n | cut -f1 -d '.'`"
+
+PLATFORM="`uname`"           # Script supports AIX, SunOS and Linux platforms
+
+# NOTE:  This script should not be run on TEMS and TEPS servers
+#        maintain the following list to prevent this from happening
+#
+ITM_SERVERS="
+  dvaaixesm01 \
+  dvaaixesm02 \
+  dhaaixesm01 \
+  dhaaixesm02 \
+  dklesm01    \
+  dklesm02    \
+  dhaaixdmz01 \
+  dhaaixdmz02 \
+  tdcesm01    \
+  tdcesm02    \
+  tdcesm03    \
+  tdcesm04    \
+  tdcesm05    \
+  ddcesm01    \
+  ddcesm02    \
+  ddcesm03    \
+  ddcesm04    \
+  ddcesm05    \
+  tnesm01e    \
+  dkesm02e    \
+  tnesm03i    \
+  dkesm04i    \
+  "
+
+#------------------------------------------------------------------------------
+#==============================================================================
+# Functions
+#
+usage ()
+{
+  cat <<EOF
+
+USAGE: itmCleanUX [-V] [-t]
+
+EOF
+
+  exit 2
+}
+
+msg ()
+{
+  echo ..... "$@" 
+}
+
+run ()
+{
+  echo ..... "$@" && "$@"
+}
+
+err ()
+{
+  echo ERROR: $* && exit 1
+}
+
+check_itm_server ()
+{
+  echo ${ITM_SERVERS} | grep " ${HOST} " >/dev/null 2>&1
+
+  [ $? == 0 ] && err "This script should not be run on ITM Server: ${HOST}"
+}
+
+#------------------------------------------------------------------------------
+#==============================================================================
+# Command line options
+#
+while getopts Vt opt
+do
+  case $opt in
+    V)
+      echo "Version: ${VERSION}"
+      exit 0
+      ;;
+    t)
+      TEMP_SET_ROOT_PASSWORD="yes"
+      ;;
+    ?)
+      usage
+      ;;
+  esac
+done
+
+shift $(($OPTIND -1))
+#printf "Remaining arguments are: %s\n" "$*"
+
+#------------------------------------------------------------------------------
+#==============================================================================
+# Sanity checking
+
+case "${PLATFORM}" in
+AIX*)
+  ITM_BOOT="/etc/rc.itm1"
+  LOST_GROUP=system
+  OS_AGENT="ux"
+  PASSWD_FILE=/etc/security/passwd
+  ;;
+#SunOS*)
+#  ITM_BOOT="/etc/init.d/ITMAgents1"
+#  LOST_GROUP=root
+#  OS_AGENT="ux"
+#  ;;
+#Linux*)
+#  ITM_BOOT="/etc/rc.d/init.d/ITMAgents1"
+#  LOST_GROUP=root
+#  OS_AGENT="lz"
+#  ;;
+*)
+  err "Unsupported platform: `uname`"
+  ;;
+esac
+
+case "`id`" in
+uid=0*)
+  :
+  ;;
+*)
+  err "Must be root to be able to run this script"
+  ;;
+esac
+
+[ -d "${ITMBIN}" ] || err "Directory does not exist: $ITMBIN"
+
+egrep "^${ITM_GROUP}:" /etc/group > /dev/null 2>&1
+
+[ $? == 0 ] || err "ITM Group does not exist in /etc/group: ${ITM_GROUP}"
+
+egrep "^${ITM_OWNER}:" /etc/passwd > /dev/null 2>&1
+
+[ $? == 0 ] || err "ITM Owner does not exist in /etc/passwd: ${ITM_OWNER}"
+
+egrep "^${LOST_GROUP}:" /etc/group > /dev/null 2>&1
+
+[ $? == 0 ] || err "LOST Group does not exist in /etc/group: ${LOST_GROUP}"
+
+egrep "^${LOST_OWNER}:" /etc/passwd > /dev/null 2>&1
+
+[ $? == 0 ] || err "LOST Owner does not exist in /etc/passwd: ${LOST_OWNER}"
+
+check_itm_server
+
+#------------------------------------------------------------------------------
+#==============================================================================
+# Main
+#
+#
+msg Changing directory to ${ITMINST}
+cd ${ITMINST}
+
+msg "Removing boot script(s)"
+case "${PLATFORM}" in
+AIX*)
+  run rmitab rcitm1
+  run rm ${ITM_BOOT}
+  ;;
+#SunOS*)
+#  run rm ${ITM_BOOT}
+#  ;;
+#Linux*)
+#  run rm ${ITM_BOOT}
+#  ;;
+*)
+  err "Unsupported platform: `uname`"
+  ;;
+esac
+
+msg "Stopping OS Agent"
+run ${ITMBIN}/itmcmd agent stop ${OS_AGENT}
+
+msg "Looking for lost+found directores"
+LOSTFOUND="`find ${ITMINST} -name 'lost+found' `"
+echo ${LOSTFOUND}
+
+msg "Moving to installation directory"
+cd ${ITMINST} || err "Unable to change to: ${ITMINST}"
+
+msg "Removing contents of installation directory"
+echo "find . -type f -depth -exec rm {} \;"
+find . -type f -depth -exec rm {} \;
+
+echo "find . -type l -depth -exec rm {} \;"
+find . -type l -depth -exec rm {} \;
+
+echo "find . -type d ! -name '.' -depth -exec rmdir {} \;"
+find . -type d ! -name '.' -depth -exec rmdir {} \;
+
+msg "Recreating lost+found directories"
+for i in ${LOSTFOUND} ; do
+
+  run mkdir $i
+  run chown ${LOST_OWNER}:${LOST_GROUP} $i
+  run chmod ${LOST_PERMS} $i
+  run chmod g-s $i
+
+done
+
+
+if [ $TEMP_SET_ROOT_PASSWORD = 'yes' ] ; then
+
+  msg "Temporarily resetting root password for install"
+
+  [ -f ${PASSWD_FILE} ] || err "Password file does not exist: ${PASSWD_FILE}"
+
+  PASSWD_FILE_TEMP="${PASSWD_FILE}_`date +%Y%m%d%H%M%S`"
+
+  run cp -p ${PASSWD_FILE} ${PASSWD_FILE_TEMP}
+  run ls -l ${PASSWD_FILE} ${PASSWD_FILE_TEMP}
+
+  msg "Temporarily change root password for install"
+  passwd
+
+  while (true) ; do
+
+    echo "Has the agent install been completed? [yes or no]: "
+    read RESP
+
+    [ "${RESP}" = "yes" ] && break
+
+  done
+
+  msg "Reinstating original password file"
+  if [ -f ${PASSWD_FILE_TEMP} ] ; then
+    run mv ${PASSWD_FILE_TEMP} ${PASSWD_FILE}
+
+  else
+    err "The temporary password file no longer exists: ${PASSWD_FILE_TEMP}"
+  fi
+
+  run ls -l ${PASSWD_FILE}
+  echo
+  run du -sk ${ITMINST}
+
+fi

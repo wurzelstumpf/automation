@@ -1,0 +1,239 @@
+#!/bin/ksh
+#==============================================================================
+# SYNOPSIS
+#   itmCreateNodeNT [-V] system smb_user
+#
+# DESCRIPTION
+#   This is a wrapper shell script to assist in the remote deploy of
+#   itm6 windows operating system agents.
+#
+#   This script uses smb to connect to the remote system.
+#
+#   It is designed to be run on the primary TEMS server to which the
+#   operating system agent will connect.
+#
+# OPTIONS
+#   system
+#          Name of the system to be installed with the itm6 agent
+#
+#   smb_user
+#          The remote user name to use when connecting with smb
+#
+# LICENSE
+#   Copyright (C) 2006-2010 Mark Matthews
+#   Distributed under the terms of the GNU General Public License
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#    
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#    
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# SEE ALSO
+#   itmSetOwnerUX, itmCreateNodeUX
+#
+#------------------------------------------------------------------------------
+#==============================================================================
+# Global Variables
+#
+VERSION="1.3"
+
+INSTDIR="C:\\Program Files\\IBM\\ITM"
+
+PATH="${INSTDIR}/bin:${PATH}"
+export PATH
+
+ENCRYPTKEY=""
+ENCRYPTKEY_DHA="DHATivoliMonitoringEncryptionKey"
+ENCRYPTKEY_DVA="DVATivoliMonitoringEncryptionKey"
+ENCRYPTKEY_MCA="MCATivoliMonitoringEncryptionKey"
+
+#------------------------------------------------------------------------------
+#==============================================================================
+# Functions
+#
+usage ()
+{
+  cat <<EOF
+
+USAGE: itmCreateNodeNT [-V] system smb_user
+
+EOF
+
+  exit 2
+}
+
+run ()
+{
+  echo ..... "$@" && "$@"
+}
+
+err ()
+{
+  echo ERROR: $* && exit 1
+}
+
+set_tems ()
+{
+  PTEMS="`uname -n | cut -f 1 -d '.'`"
+
+  case "${PTEMS}" in
+
+  # NOTE:  DVA TEMS servers
+  # ----------------------------
+  dvaaixesm01)
+     STEMS="dvaaixesm02"
+     ENCRYPTKEY="${ENCRYPTKEY_DVA}"
+     ;;
+  dvaaixesm02)
+     STEMS="dvaaixesm01"
+     ENCRYPTKEY="${ENCRYPTKEY_DVA}"
+     ;;
+
+
+  # NOTE:  DHA TEMS servers
+  # ----------------------------
+  dhaaixesm02)
+     STEMS="dklesm02"
+     ENCRYPTKEY="${ENCRYPTKEY_DHA}"
+     ;;
+   dklesm02)
+     STEMS="dhaaixesm02"
+     ENCRYPTKEY="${ENCRYPTKEY_DHA}"
+     ;;
+
+   dhaaixdmz01)
+     STEMS="dhaaixdmz02"
+     ENCRYPTKEY="${ENCRYPTKEY_DHA}"
+     ;;
+   dhaaixdmz02)
+     STEMS="dhaaixdmz01"
+     ENCRYPTKEY="${ENCRYPTKEY_DHA}"
+     ;;
+
+  # NOTE:  MCA TEMS servers
+  # -----------------------
+  ddcesm01)
+    STEMS=""
+     ENCRYPTKEY="${ENCRYPTKEY_MCA}"
+    ;;
+
+  ddcesm02)
+    STEMS="tdcesm02"
+     ENCRYPTKEY="${ENCRYPTKEY_MCA}"
+    ;;
+  tdcesm02)
+    STEMS="ddcesm02"
+     ENCRYPTKEY="${ENCRYPTKEY_MCA}"
+    ;;
+
+  ddcesm03)
+    STEMS="tdcesm03"
+     ENCRYPTKEY="${ENCRYPTKEY_MCA}"
+    ;;
+  tdcesm03)
+    STEMS="ddcesm03"
+     ENCRYPTKEY="${ENCRYPTKEY_MCA}"
+    ;;
+
+  ddcesm04)
+    STEMS="tdcesm04"
+     ENCRYPTKEY="${ENCRYPTKEY_MCA}"
+    ;;
+  tdcesm04)
+    STEMS="ddcesm04"
+     ENCRYPTKEY="${ENCRYPTKEY_MCA}"
+    ;;
+
+  dkesm02e)
+    STEMS="tnesm01e"
+     ENCRYPTKEY="${ENCRYPTKEY_MCA}"
+    ;;
+  tnesm01e)
+    STEMS="dkesm02e"
+     ENCRYPTKEY="${ENCRYPTKEY_MCA}"
+    ;;
+
+  dkesm04i)
+    STEMS="tnesm03i"
+     ENCRYPTKEY="${ENCRYPTKEY_MCA}"
+    ;;
+  tnesm03i)
+    STEMS="dkesm04i"
+     ENCRYPTKEY="${ENCRYPTKEY_MCA}"
+    ;;
+
+  *)
+    err "Current system is an unrecognised TEMS server: ${PTEMS}"
+    ;;
+  esac
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Main
+#
+while getopts V opt
+do
+  case $opt in
+    V)
+      echo "Version: ${VERSION}"
+      exit 0
+      ;;
+    ?)
+      usage
+      ;;
+  esac
+done
+
+shift $(($OPTIND -1))
+#printf "Remaining arguments are: %s\n" "$*"
+
+
+[ -z "${1}" ] && usage
+SYSTEM="${1}"
+
+[ -z "${2}" ] && usage
+SMBUSER="$2"
+
+set_tems
+
+[ -z "${ENCRYPTKEY}" ] && err "Variable ENCRYPTKEY is empty"
+
+if [ -n "${STEMS}" ] ; then
+
+run tacmd createNode                     \
+  --host smb://"${SYSTEM}"               \
+  --directory "${INSTDIR}"               \
+  --username "${SMBUSER}"                \
+  --property                             \
+    SERVER=IP.SPIPE://"${PTEMS}":3660    \
+    KEY="${ENCRYPTKEY}"                 \
+    BACKUP="YES"                         \
+    BSERVER="${STEMS}"                   \
+    BPROTOCOL1="IP.SPIPE"                \
+    BPORT=3660
+    
+else
+
+run tacmd createNode                     \
+  --host smb://"${SYSTEM}"               \
+  --directory "${INSTDIR}"               \
+  --username "${SMBUSER}"                \
+  --property                             \
+    SERVER=IP.SPIPE://"${PTEMS}":3660    \
+    KEY="${ENCRYPTKEY}"                 \
+    BACKUP="NO"
+
+fi
+
+#------------------------------------------------------------------------------
+#==============================================================================
+#
+#------------------------------------------------------------------------------

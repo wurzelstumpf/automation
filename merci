@@ -1,0 +1,629 @@
+#!/usr/local/bin/expect --
+#==============================================================================
+# SYNOPSIS
+#   merci [options] --exec command \; {--hosts file | host ...}
+#
+# DESCRIPTION
+#   This script executes a command on one or more remote hosts.
+#
+#   By default a secure shell connection is made to each remote host as the
+#   user who executed this script.  Following successful login the command
+#   specified by the --exec option is executed.
+#
+#   The script will request a password for initial login when the --login
+#   option is specified.
+#
+#   This is useful in situations where a password is required for initial
+#   login or when the command needs to be run remotely under a different
+#   user id.
+#
+#   When the --su and --su-key options are specified the script uses the
+#   su command to execute the command on each remote host.  For example,
+#   following successful login, and assuming the specified user is root,
+#   the script would execute something like:
+#
+#       su root -c "command"
+#
+# OPTIONS
+#   --rsh
+#                       Connect using rsh.  The default is ssh.
+#
+#   --bad file
+#                       Write out the list of hosts that generated
+#                       exceptions to the specified file.
+#
+#   --timeout seconds
+#                       Number of seconds expect waits for a response
+#
+#   --debug
+#                       Display extra information
+#
+#   --no-summary
+#                       Do not show the summary output
+#
+#   --no-cmd-output
+#                       Do not show the output of the command
+#                       executed on the remote host(s).
+#
+#   --login user
+#                       Name of remote user for initial login to the
+#                       remote system.   Default is the name of the
+#                       user who executed this script.
+#
+#                       NOTE:  This option causes the script to
+#                              prompt for the password of the
+#                              login user.
+#
+#   --su user
+#                       Execute the command on the remote host(s)
+#                       by running:   su user -c "command"
+#
+#                       NOTE:  This option causes the script to
+#                              prompt for the password of the
+#                              su user on the remote host(s).
+#
+#   --su-key user
+#                       Execute the command on the remote host(s)
+#                       by running:   su user -c "command"
+#
+#                       NOTE:  This option causes the script to
+#                              prompt for a key which is used to
+#                              generate the password of the su
+#                              user on each remote host.
+#
+#   --exec command \;
+#                       Command to be executed on the remote host.
+#                       This must be terminated by a semi-colon.
+#
+#                       NOTE:  The semi-colon should be escaped
+#                              as shown to protect it from
+#                              interpretation by the unix shell
+#
+#   --hosts file
+#                       Path to a file containing a list of hosts
+#                       on which the command is to be executed.
+#
+#   host ...
+#                       The names of one or more hosts on which
+#                       the command is to be executed
+# 
+# LICENSE
+#   Copyright (C) 2006-2010 Mark Matthews
+#   Distributed under the terms of the GNU General Public License
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#    
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#    
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#    
+# RCS
+#   $Author $
+#   $Date $
+#   $Revision: 1.7 $
+#------------------------------------------------------------------------------
+#==============================================================================
+# sanity check
+#
+exp_version -exit 5.0
+#------------------------------------------------------------------------------
+#==============================================================================
+# global variables
+#
+set DEBUG "false"
+log_user 0
+match_max 10000
+set opt(login) 0
+set opt(su) 0
+set opt(su-key) 0
+set opt(bad) 0
+set bad_file ""
+set login(user) [exec who am i | cut -f1 -d\ ]
+set login(passwd) ""
+set su(user) ""
+set su(passwd) ""
+set su(key) ""
+set timeout 30
+set cmd ""
+set HOSTS ""
+set ssh "ssh"
+set show_summary 1
+set show_cmd_output 1
+#------------------------------------------------------------------------------
+#==============================================================================
+# functions
+#
+proc usage {umsg} {
+  global argv0
+  
+  set prog [exec basename $argv0]
+
+  send_user "\r\nUsage:  $umsg
+
+  $prog \[options\] --exec command \\; \{--hosts file | host ...\}
+
+  where this option is required:
+      --exec command \\;    command terminated by semicolon
+
+  and only one of these options is required:
+      --hosts file       file containing list of hosts (one per line)
+      host ...           one or more host names
+
+  and these options are mutually exclusive:
+      --su user          run command using su and prompt for user password
+      --su-key user      run command using su and prompt for user key
+
+  and other options may be:
+      --login user       connect as user to remote host
+      --rsh              use rsh to connect (instead of ssh)
+      --bad file         write list of bad hosts to file
+      --timeout seconds  how long to wait for a response
+      --debug            display extra information
+      --no-summary       do not show the summary
+      --no-cmd-output    do not show output of command
+      --version|-V       print script version
+
+"
+    exit 2
+}
+
+proc dbg {dmsg} {
+    global DEBUG
+    if [string match $DEBUG "true"] {
+        send_user "\r\n***** DEBUG: $dmsg \r\n"
+    }
+}
+
+proc err {emsg} {
+    send_user "\r\nERROR $emsg \n"
+    exit 1
+}
+
+proc banner {imsg} {
+    send_user "\r\n====> $imsg \n"
+}
+
+proc kill {pid} {
+    if [ catch "exec kill $pid" ] {
+        dbg "Failed: kill $pid (process may already be terminated)"
+    }
+}
+
+proc mkpasswd {h k} {
+    global badhost
+
+    set pass ""
+    set node [string trim $h]
+    set len [string length $node]
+    if {[expr $len < 2]} {
+        set badhost($h) "Host name less than two characters long: $h"
+        return ""
+    }
+    append pass [string range $node 0 1]    
+    append pass $k
+    append pass [string range $node [expr $len - 2] [expr $len - 1]]
+    return $pass
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# command line parameters
+#
+if {$argc == 0} {
+    usage "No arguments specified"
+}
+
+set cmd_terminated 0
+
+for {set i 0} {$i < $argc} {incr i} {
+    set arg [lindex $argv $i]
+    switch -regexp -- $arg  \
+    "^--hosts$" {
+        incr i
+        set file [lindex $argv $i]
+        if [catch {open "$file" "r"} FILE] {
+            err "Unable to read file: $file"
+        } else {
+
+            # NOTE:  Read each line of the file and skip lines
+            #        containing only whitespace and lines beginning
+            #        with the comment (#) character.  Then take the
+            #        first word of the line and add it to the list
+            #        of host names.
+            #
+            while {[gets $FILE line] != -1} {
+                set line [string trimleft $line]
+                if {[string length $line]} {
+                    if {![string equal -length 1 $line "\#"]} {
+                        regsub {([a-zA-Z0-9_\-]+).*}  $line {\1} node
+                        lappend HOSTS $node
+                    }
+                }
+            }
+            close $FILE
+        }
+        continue
+        
+    } "^--exec$" {
+        for {incr i} {$i < $argc} {incr i} {
+            append cmd [lindex $argv $i] " "
+            set lind [expr [string length $cmd] - 2]
+            set semi [string index $cmd $lind]
+            if {[string match "\;" $semi]} {
+                set cmd [string trimright $cmd " ;"]
+                set cmd_terminated 1
+                break;
+            }
+        }
+        continue
+
+    } "^--login$" {
+        set opt(login) 1
+        incr i
+        set login(user) [lindex $argv $i]
+        continue
+
+    } "^--su$" {
+        if {$opt(su-key) || $opt(su)} {
+            usage "Specify  --su  OR  --su-key  ONCE ONLY"
+        }
+        set opt(su) 1
+        incr i
+        set su(user) [lindex $argv $i]
+        continue
+
+    } "^--su-key$" {
+        if {$opt(su-key) || $opt(su)} {
+            usage "Specify  --su  OR  --su-key  ONCE ONLY"
+        }
+        set opt(su-key) 1
+        incr i
+        set su(user) [lindex $argv $i]
+        continue
+
+    } "^--bad$" {
+        set opt(bad) 1
+        incr i
+        set bad_file [lindex $argv $i]
+        continue
+
+    } "^--timeout$" {
+        incr i
+        set timeout [lindex $argv $i]
+        continue
+
+    } "^--debug$" {
+        set DEBUG "true"
+        continue
+        
+    } "^--rsh$" {
+        set ssh "rsh"
+        continue
+        
+    } "^--no-summary$" {
+        set show_summary 0
+        continue
+
+    } "^--no-cmd-output$" {
+        set show_cmd_output 0
+        continue
+
+    } "^(--version|-V)$" {
+        set rev [exec egrep Revision: $argv0 | head -1 ]
+        regsub {[^0-9\.]+([0-9\.]+).*} $rev {\1} ver
+        puts $ver
+        exit
+        
+    } "^(--.*|-.*)$" {
+        usage "Unknown option: $arg"
+        
+    } default {
+        lappend HOSTS [lindex $argv $i]
+    }
+}
+
+if { !$cmd_terminated } {
+    usage "Command not terminated by semicolon"
+}
+
+set cmd [string trim $cmd]
+if { ![string length $cmd] } {
+    usage "Empty command string"
+}
+
+if { [expr [llength $HOSTS] < 1] } {
+    usage "No target hosts specified"
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# gather passwords
+#
+# NOTE:  The password and/or keys requested depend on the options
+#        provided on the command line.  The table below indicates,
+#        based on command line options, which passwords and/or keys
+#        will be requested:
+#
+# |---------------------------------------------------------|
+# |   Variables   |                Options                  |
+# |---------------|-----------------------------------------|
+# |               |none |login |login |login  |su   |su-key |
+# |               |     |      |   su |su-key |     |       |
+# |---------------|-----|------|------|-------|-----|-------|
+# |login(passwd)  |     |  yes |  yes |  yes  |     |       |
+# |su(passwd)     |     |      |  yes |       | yes |       |
+# |su(key)        |     |      |      |  yes  |     |   yes |
+# |---------------------------------------------------------|
+#
+# NOTE:  Zero length keys are not supported.
+#                                                                                                   
+#
+trap exit SIGINT
+set timeout -1
+stty -echo
+
+if { $opt(login) } {
+
+    send_user "Login Password for $login(user): "
+    expect_user -re "(.*)\n"
+    send_user "\n"
+    set login(passwd) $expect_out(1,string)
+    send_user "Retype Login Password for $login(user): "
+    expect_user -re "(.*)\n"
+    set login(check) $expect_out(1,string)
+    send_user "\n"
+    if ![string match $login(passwd) $login(check)] {
+        err "Password Mismatch -- please try again"
+        exit
+    }
+}
+
+if { $opt(su) } {
+    send_user "Password for su $su(user): "
+    expect_user -re "(.*)\n"
+    send_user "\n"
+    set su(passwd) $expect_out(1,string)
+    send_user "Retype Password for su $su(user): "
+    expect_user -re "(.*)\n"
+    set su(check) $expect_out(1,string)
+    send_user "\n"
+    if ![string match $su(passwd) $su(check)] {
+        err "Password Mismatch -- please try again"
+        exit
+    }
+}
+
+if { $opt(su-key) } {
+    send_user "Key for su $su(user): "
+    expect_user -re "(.*)\n"
+    send_user "\n"
+    set su(key) $expect_out(1,string)
+    send_user "Retype Key for su $su(user): "
+    expect_user -re "(.*)\n"
+    set su(check) $expect_out(1,string)
+    send_user "\n"
+    if ![string match $su(key) $su(check)] {
+        err "Password Mismatch -- please try again"
+        exit
+    }
+}
+
+set timeout 30
+stty echo
+#------------------------------------------------------------------------------
+#==============================================================================
+# should su be used to run the command
+#
+if { $opt(su) || $opt(su-key) } {
+    set cmd "su $su(user) -c \"$cmd\""
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# display target hosts and command
+#
+if {$show_summary} {
+
+    banner "Summary from [exec date {+%Y-%m-%d %H:%M:%S}]"
+    send_user "\n      Login method: $ssh"
+    send_user "\n        Login user: $login(user)"
+    send_user "\n           Command: $cmd"
+    send_user "\n      Target hosts: [lindex $HOSTS 0]\n"
+
+    for {set i 1} {$i < [llength $HOSTS]} {incr i} {
+        send_user "                    [lindex $HOSTS $i]\n"
+    }
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# main program
+#
+for {set i 0} {$i < [llength $HOSTS]} {incr i} {
+
+  set host [lindex $HOSTS $i]
+  set prompt "^(%|\\\$|>)|( %| \\\$| >)|(% |\\\$ |> )|($login(user)@$host\[^ \]+ )$"
+  set logged_in 0
+  set login_passwd_prompt 1
+  set su_passwd_prompt 1
+  banner $host
+  
+  if [ catch {set PID [spawn -noecho $ssh -l $login(user) $host] } ] {
+      err "Unable to execute: $ssh -l $login(user) $host"
+  }
+
+  while {1} {
+      expect {
+          -nocase -re "changing password|password has expired" {
+              dbg "matched: $expect_out(0,string)"
+              set badhost($host) "password expired"
+              kill $PID
+              break
+          }
+          -nocase -re "Host key not found|continue connecting"  {
+              dbg "matched: $expect_out(0,string)"
+              send "yes\r"
+              dbg "sent: yes"
+              exp_continue
+          }
+          -nocase "change the host key on disk"  {
+              dbg "matched: $expect_out(0,string)"
+              send "yes\r"
+              dbg "sent: yes"
+              exp_continue
+          }
+          -nocase "Connection Refused"  {
+              dbg "matched: $expect_out(0,string)"
+              set badhost($host) "connection refused"
+              kill $PID
+              break
+          }
+          -nocase -re "wrong passwd|Password incorrect|invalid" {
+              dbg "matched: $expect_out(0,string)"
+              set badhost($host) "invalid login password or user id"
+              kill $PID
+              break
+          }
+          ": END" {
+              dbg "matched: $expect_out(0,string)"
+              send "q\r"
+              dbg "sent: q"
+              exp_continue
+          }
+          -nocase "password:" {
+              dbg "matched: $expect_out(0,string)"
+              if {$login_passwd_prompt} {
+                  set login_passwd_prompt 0
+                  send "$login(passwd)\r"
+                  dbg "sent: $login(passwd)"
+                  exp_continue
+              } else {
+                  set msg "invalid login password"
+                  dbg $msg
+                  set badhost($host) $msg
+                  kill $PID
+                  break
+              }
+          }
+          -re "$prompt" {
+              dbg "matched: $expect_out(0,string)"
+              set logged_in 1
+              break
+          }
+          eof {
+              set msg "eof: expect: password or login prompt"
+              dbg $msg
+              set badhost($host) $msg
+              break
+          }
+          timeout {
+              set msg "timeout: expect: password or login prompt"
+              dbg $msg
+              set badhost($host) $msg
+              kill $PID
+              break
+          }
+      }
+  }
+
+  if (!$logged_in) {
+      continue
+  }
+
+  if { $opt(su-key)} {
+      set su(passwd) [mkpasswd $host $su(key)]
+  }
+
+  send -- "$cmd \r"
+  dbg "sent: $cmd"
+
+  if {$show_cmd_output} {
+      if {!$opt(su) && !$opt(su-key)} {
+          log_user 1
+          dbg "logging output"
+      }
+  }
+
+  while {1} {
+      expect {
+          -nocase -re "sorry|cannot su" {
+              dbg "matched: $expect_out(0,string)"
+              set badhost($host) "authentication denied: $cmd"
+              kill $PID
+              break
+          }
+          -nocase "password:" {
+              dbg "matched: $expect_out(0,string)"
+              if {$su_passwd_prompt} {
+                  set su_passwd_prompt 0
+                  send -- "$su(passwd)\r"
+                  dbg "sent: $su(passwd)"
+                  if {$show_cmd_output} {
+                      log_user 1
+                      dbg "logging output"
+                  }
+                  exp_continue
+              } else {
+                  set msg "invalid password for $su(user)"
+                  dbg $msg
+                  set badhost($host) $msg
+                  kill $PID
+                  break
+              }
+          }
+          -re "$prompt" {
+              dbg "matched: $expect_out(0,string)"
+              send_user "\r\n"
+              break
+          }
+          eof {
+              set msg "expect: eof: $cmd"
+              dbg $msg
+              set badhost($host) $msg
+              break
+          }
+          timeout {
+              set msg "expect: timeout: $cmd"
+              dbg $msg
+              set badhost($host) $msg
+              kill $PID
+              break
+          }
+      }
+  }
+
+  log_user 0
+  close
+  wait
+}
+
+send_user "\n"
+#------------------------------------------------------------------------------
+#==============================================================================
+# list exceptions
+#
+if {[array size badhost]} {
+
+    banner "Exceptions\n"
+    foreach entry [array names badhost] {
+        send_user "            $entry: $badhost($entry)\n"
+    }
+
+    if {$opt(bad)} {
+        if [catch {open "$bad_file" "w"} FFILE] {
+            err "Unable to write file: $bad_file"
+        } else {
+            foreach entry [array names badhost] {
+                puts $FFILE $entry
+            }
+            close $FFILE
+        }
+    }
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+#
+#------------------------------------------------------------------------------

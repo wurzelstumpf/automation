@@ -1,0 +1,1090 @@
+#!/usr/bin/perl -w
+#==============================================================================
+# NOTE:  To view documentation run script with the "--pod" option or
+#        do it yourself by running "perldoc 'path_to_this_script'"
+#    
+# LICENSE
+#   Copyright (C) 2006-2010 Mark Matthews
+#   Distributed under the terms of the GNU General Public License
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#    
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#    
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#------------------------------------------------------------------------------
+#==============================================================================
+# Modules
+#
+use Time::Local;
+use Getopt::Long;
+#------------------------------------------------------------------------------
+#==============================================================================
+# Globals
+#
+$main::VERSION =  substr('$Revision: 1.3 $', 11, -2);
+$synopsis = <<"EOS";
+
+  mepau {--pod|--help|--version}
+
+  mepau [data] [selector] [action] [other]
+  
+    For faster processing, data options allow endpoint details
+    to be written to and read from a text file:
+
+      --dump file   Read the endpoint manager database and
+                    write endpoint details to a text file
+      --load file   Read endpoint details from a text file
+
+    Applying the operators, = (equals), > (greater than),
+    < (less than) or ! (not equal to) to the value of one or
+    more attributes a subset of endpoints can be selected:
+  
+      --select "<attr_name><operator><attr_value>"
+
+    The default action is to print a list of endpoints, and
+    any matching attributes, one per line to standard out.
+    It is also possible to cull the selected endpoints:
+ 
+      --cull        Remove the endpoint
+      --noepmgr     If culling, leave the endpoint in the
+                    endpoint manager database (no wdelep).
+      --noinv       If culling, leave endpoint in the
+                    inventory database (no wrminvnode).
+      --nosummary   When culling is finished do not print
+                    a summary of successes and failures.
+      --nostatus    When culling, endpoints that are up
+                    (wep <ep> status) are not removed.
+                    This option disables this check.
+
+    And other options are:
+      --noverbose   Tells the script not to be so chatty.
+
+EOS
+
+$| = 1;                   # Flush io buffer after each read or write
+$current_time = time();   # Current seconds since epoch
+@failed = ();             # Array of hashes for failed cull details
+@selector = ();           # Array of hashes for arguments to select
+#------------------------------------------------------------------------------
+#==============================================================================
+# Process command line arguments
+#
+$opt_dump = '';
+$opt_load = '';
+$opt_cull = 0;
+$opt_inv = 1;
+$opt_epmgr = 1;
+$opt_summary = 1;
+$opt_status = 1;
+$opt_verbose = 1;
+$opt_version = 0;
+$opt_pod = 0;
+$opt_help = 0;
+
+&usage unless GetOptions(               "dump=s", \$opt_dump,
+                                        "load=s", \$opt_load,
+                                      "select=s", \&selector,
+                                          "cull", \$opt_cull,
+                                          "inv!", \$opt_inv,
+                                        "epmgr!", \$opt_epmgr,
+                                      "summary!", \$opt_summary,
+                                       "status!", \$opt_status,
+                                      "verbose!", \$opt_verbose,
+                                           "pod", \$opt_pod,
+                                        "help|?", \$opt_help,
+                                     "version|V", \$opt_version,
+                         );
+
+if ($opt_help)
+{
+  print $synopsis;
+  exit (0);
+}
+
+if ($opt_pod)
+{
+  exit(system("perldoc", $0));
+}
+
+if ($opt_version)
+{
+  print "(", $0, ")", " ", $main::VERSION, "\n";
+  exit (0);
+}
+
+if ($opt_cull == 0 and ($opt_inv + $opt_epmgr + $opt_summary + $opt_status < 4))
+{
+    &usage("Options only valid with cull (noinv, noepmgr, nosummary, nostatus)");
+}
+
+for (@selector)
+{
+  print "aname: ", $_->{'aname'}, " aop: ", $_->{'aop'}, " avalue: ", $_->{'avalue'}, "\n";
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Source tivoli environment (this is unashamedly lazy ;-)
+#
+# $tivenv = "/etc/Tivoli/setup_env.sh";
+# die "Unable to read tivoli environment: $tivenv \n" unless -r $tivenv;
+# %ENV = map {chomp ; split('=',$_, 2) } (`sh -c ". $tivenv ; env"`);
+#------------------------------------------------------------------------------
+#==============================================================================
+# Gather endpoint data
+#
+if ($opt_load)
+{
+  # Read endpoint data from text file
+  # ---------------------------------
+  open(WEP, $opt_load) or die "Unable to read file: $opt_load: $!\n";
+  my($href) = &ep_get(\*WEP);
+  do
+  {
+    &ep_proc($href);
+    $href = &ep_get(\*WEP);
+  }
+  while($href);
+  close(WEP);
+}
+else
+{
+  # Query the endpoint manager database
+  # -----------------------------------
+  my ($cmd) = "wgetallinst Endpoint";
+  &msg("Gathering list of endpoints ($cmd)");
+  my (@eplist) = `$cmd`;
+  die "Command failed: $cmd: $!\n" if ($? != 0);
+
+  &msg("Processing " . $#eplist + 1 . " endpoints (wep <ep_label>)");
+
+  for (my($i) = 0; $i <= $#eplist ; $i++)
+  {
+    my ($cmd) = "wep $eplist[$i]";
+    open(WEP, $cmd . "|") or die "Command failed: $cmd: $!\n";
+    my($ep) = &ep_get(\*WEP);
+    print "." if ($opt_verbose and (($i % 10) == 0));     # A dot for every 10 weps
+    &ep_proc($ep);
+    close(WEP);
+  }
+
+  print "\n" if ($opt_verbose);
+}
+
+exit();
+#------------------------------------------------------------------------------
+#==============================================================================
+# Select endpoints
+#
+for my $href (@ep)
+{
+  my $selected = 0;
+
+  if ($opt_interpreter{'op'})
+  {
+    next unless(&compare_interp($href->{'interp'}, \%opt_interpreter));
+    $selected++;
+  }
+
+  if ($opt_revision{'op'})
+  {
+    next unless(&compare_version($href->{'version'}, \%opt_revision));
+    $selected++;
+  }  
+
+  if ($opt_label{'op'})
+  {
+    next unless (&compare_label($href->{'label'}, \%opt_label));
+    $selected++;
+  }
+
+  if ($opt_last_login_time{'op'})
+  {
+    next unless (&compare_days($current_time,
+                               $href->{'last_login_time'},
+                               \%opt_last_login_time),
+                 );
+    $selected++;
+  }
+
+  if ($opt_last_migration_time{'op'})
+  {
+    next unless (&compare_days($current_time,
+                               $href->{'last_migration_time'},
+                               \%opt_last_migration_time)
+                 );
+    $selected++;
+  }
+
+  if ($opt_last_method_time{'op'})
+  {
+    next unless (&compare_days($current_time,
+                               $href->{'last_method_time'},
+                               \%opt_last_method_time)
+                 );
+    $selected++;
+  }
+
+  push (@sep, $href) if ($selected == ($#selector + 1));
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Action selected endpoints
+#
+if ($#selector < 0)   # No selectors so apply action to all endpoints 
+{
+  @sep = @ep;
+}
+
+for my $href (@sep)
+{
+  if ($opt_cull)
+  {
+    # NOTE: Don't dump endpoints which have been
+    #       culled from the endpoint manager database
+    # -----------------------------------------------
+    push (@dep, $href) unless (&ep_cull($href) >= 2);
+  }
+  else
+  {
+    push (@dep, $href);
+    &ep_print($href);
+  }
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Dump endpoints
+#
+if ($opt_dump)
+{
+  open (DUMP, ">" . $opt_dump) or die "Unable to write file: $opt_dump: $!\n";
+  &ep_dump(\@dep, \*DUMP);
+  close (DUMP);  
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Summary
+#
+&summary() if ($opt_cull and $opt_summary);
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: selector
+#     Args: option_name, option_value
+#  Globals: @selector
+#  Purpose: This function is designed to be called from function Getoptions.
+#           It basically parses the value of the select option and populates
+#           the global array (@selector) with a reference to a hash.
+#           
+#           Each hash is setup to contain three elements, the name of the
+#           endpoint attribute (keyed by aname), the operator to be used
+#           (keyed by aop) and the value to be compared (keyed by avalue).
+#
+#           The value of the select option should look like the following:
+#
+#             <attribute_name><operater><attribute_value>
+#
+#           White space may exist between each component.  For example:
+#
+#             interp ! aix.*
+#
+#           And note that the value may be a perl regular expression.
+#
+sub selector
+{
+  my $option  = shift;                # Raw name of option
+  my $value = shift;                  # Raw value of option
+
+  local($_);              
+
+  foreach ('=', '>', '<', '!')        # Supported operators
+  {
+    my $pos = index($value, $_);
+
+    if ($pos > -1)                    # Found an operator
+    {
+      my $aname = substr($value, 0, $pos);     # Get attribute name
+      my $aop =   substr($value, $pos, 1);     # Get operator
+      my $avalue = substr($value, $pos + 1);   # Get attribute value
+
+      &trim($aname, $aop, $avalue);   # Remove white space front and back
+
+      &usage("Option $option requires an endpoint attribute name") unless ($aname);
+      &usage("Option $option requires an attribute value") unless ($avalue);
+
+      push(@selector, { 'aname' => $aname, 'aop' => $aop, 'avalue' => $avalue });
+
+      return;
+    }
+  }
+  &usage("Operator should be one of: '=' '>' '<' '!'");
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: ep_get
+#     Args: filehandle_ref
+#  Purpose: Reads from the file handle reference, filehandle_ref, which should
+#           contain the output of one or more "wep <ep_label>" commands:
+#
+#                      object 1248115114.50818.508+#TMF_Endpoint::Endpoint#
+#                       label mn5
+#                     version 37113
+#                          id ZW91HKKKV1JXB14V3DQF00000578
+#                     gateway 1248115114.49610.19#TMF_Gateway::Gateway#
+#                pref_gateway 1248115114.49610.19#TMF_Gateway::Gateway#
+#                     netload OBJECT_NIL
+#                      interp aix4-r1
+#                  login_mode Endpoint is operating in desktop mode
+#                             User may not change endpoint mode
+#                    protocol TCPIP
+#                     address 18.124.21.145+9495
+#                      policy OBJECT_NIL
+#                       httpd tivoli:s7Y,ufxL
+#                       alias OBJECT_NIL
+#                upgrade_mode Endpoint is operating in upgrade enabled  mode
+#        
+#             last_login_time 2006/03/18-21:27:28
+#         last_migration_time 2006/03/18-21:27:27
+#            last_method_time 2006/07/19-14:30:08
+#
+#
+sub ep_get()
+{
+  my ($fh) = shift;
+  my ($pos) = -1;    # Position of space between attr name and its value
+  my (%stash);       # Hash containing endpoint attributes and values
+
+  local ($_);        # Temporarily replace global $_
+
+  while (<$fh>)
+  {
+    next if /^\s*$/;         # Skip empty lines
+
+    my($len) = length($_);   # For possible rewind 
+
+    if ($pos > -1)           # Position has already been determined
+    {
+      my($aname) = substr($_, 0, $pos);
+      my($avalue) = substr($_, $pos);
+
+      &trim($aname, $avalue);    # Remove white space front and back
+
+      if ($aname)   # Add attribute name and value to stash
+      {
+        if ($aname eq 'object')  # Beginning details of next endpoint
+        {
+          seek($fh, -$len, SEEK_CUR);  # Rewind a line
+          return (exists $stash{'object'}) ? \%stash : undef;  
+        }
+
+        warn "Attribute name already exists: '$aname'"
+          if (exists $stash{$aname});
+
+        $stash{$aname} = $avalue;
+
+        push (@{$stash{'_order'}}, $aname);  # Remember order of attr names
+      }
+      else    # No attr name found
+      {
+        if ($avalue)  # Then value belongs to previous attr name
+        {
+          # Retrieve last attr added to stash
+          # ---------------------------------
+          my ($attr) = pop(@{$stash{'_order'}});
+
+          if ($attr)  # If last attr name exists
+          {
+            $stash{$attr} .= "|" . $avalue;     # Append value
+            push(@{$stash{'_order'}}, $attr);      # Return name to array
+          }
+        }
+      }
+    }
+    else      # Need to find line beginning endpoint details
+    {
+      $pos = index($_, "object");
+
+      if ($pos > -1)      # Found the first line containing endpoint details
+      {
+        $pos += length("object");  # Set to space following attr name object
+        
+        my($aname) = substr($_, 0, $pos);
+        my($avalue) = substr($_, $pos);
+        &trim($aname, $avalue);           # Remove white space front and back
+        $stash{$aname} = $avalue;
+        push (@{$stash{'_order'}}, $aname);  # Remember order of attr names
+        
+      }
+    }
+  }
+  return (exists $stash{'object'}) ? \%stash : undef;  
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: ep_proc
+#  Purpose: Process endpoint
+#
+sub ep_proc()
+{
+  my $href = shift;
+
+  &ep_dump($href);
+
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: ep_dump
+#     Args: hash_ref file_handle_ref
+#  Purpose: Write the endpoint details to the file handle provided.
+#           If no file handle is provide this function writes to
+#           standard output.
+#
+sub ep_dump()
+{
+  my ($href) = shift;
+  my ($fh) = shift;
+  my ($len) = 0;
+
+  $fh = *STDOUT unless ($fh);
+
+  local($_);
+
+  for (@{$href->{'_order'}})
+  {
+    my ($alen) = length($_);
+    $len = $alen if ($alen > $len);   # Find longest attr name length
+  }
+
+  $len += 2;
+
+  for (@{$href->{'_order'}})
+  {
+    printf $fh "%*s %s" , $len, $_ , $href->{$_};
+    printf $fh "\n";
+
+  }
+
+  printf $fh "\n";
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: compare_days
+#  Returns: If true return 1 otherwise return 0
+#
+sub compare_days()
+{
+  my ($curr_time_sec, $ep_time_str, $href) = @_;
+  &trim($curr_time_sec, $ep_time_str);
+
+  if (${$href}{'value'} =~ /^no.*$/i)        # Be generous with abbreviation
+  {
+    return ($ep_time_str =~ /^NOT_YET_SET$/i) ? 1 : 0;
+  }
+
+  return 0 unless ($ep_time_str =~ /^[0-9\/:\-]+$/);   # Return unless time string
+
+  # $ep_time_str looks like:  2005/02/15-15:39:20
+  #  but can also be set to:  NOT_YET_SET
+  # -----------------------------------------------
+  my ($year, $month, $day, $hour, $min, $sec) =
+      split(/[\/:\-]/, $ep_time_str, 6);
+
+
+  # Convert time string to number of seconds since epoch
+  # NOTE:  When using Time::Local
+  #        months range from 0 .. 11
+  #        and the year is the current year minus 1900
+  # --------------------------------------------------
+  $month = $month - 1;
+  $year = $year - 1900;
+  my $ep_time_sec = timelocal($sec, $min, $hour, $day, $month, $year);
+  my $opt_time_sec = ${$href}{'value'} * 24 * 60 * 60;
+
+  if (${$href}{'op'} eq ">")       # Greater than comparison
+  {
+    return 1 if ($curr_time_sec - $ep_time_sec > $opt_time_sec);
+  }
+  elsif (${$href}{'op'} eq "<")    # Less than comparison
+  {
+    return 1 if ($curr_time_sec - $ep_time_sec < $opt_time_sec);
+  }
+  else                             # On a particular day
+  {
+    return 1 if (int(($curr_time_sec - $ep_time_sec) / (24 * 60 * 60))
+                 == ${$href}{'value'});
+  }
+  return 0;
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: compare_label
+#  Purpose: Performs regular expression comparison of labels
+#  Returns: 1 ..... if label matches
+#           0 ..... if no match
+#
+sub compare_label()
+{
+  my ($ep_label, $href) = @_;
+  my $re_label = $href->{'value'};
+  return ($ep_label =~ /${re_label}/);
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: compare_interp
+#  Returns: If interpreter matches return 1 otherwise return 0
+#  Purpose: Performs a case insensitive comparison of two strings.
+#
+sub compare_interp()
+{
+  my ($ep_interp, $href) = @_;
+
+  if (${$href}{'op'} eq "!")
+  {
+    return 1 if (${$href}{'value'} !~ /$ep_interp/i);
+  }
+  else
+  {
+    return 1 if (${$href}{'value'} =~ /$ep_interp/i);
+  }
+
+  return 0;
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: compare_version
+#  Returns: If comparison is true return 1,otherwise return 0
+#
+sub compare_version()
+{
+  my ($ep_version, $href) = @_;
+  &zero_pad($ep_version, ${$href}{'value'});  
+
+  if (${$href}{'op'} eq ">")         # Greater than comparison
+  {
+    return 1 if ($ep_version > ${$href}{'value'});
+  }
+  elsif (${$href}{'op'} eq "<")      # Less than comparison
+  {
+    return 1 if ($ep_version < ${$href}{'value'});
+  }
+  elsif (${$href}{'op'} eq "!")      # Not equal comparison
+  {
+    return 1 if ($ep_version != ${$href}{'value'});
+  }
+  else                               # Equal 
+  {
+    return 1 if ($ep_version == ${$href}{'value'});
+  }
+  return 0;
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: zero_pad
+#  Returns: nothing
+#  Purpose: Take two strings and pad the shorter with
+#           zeros until they are both the same length.
+#  Comment: Ugly but effective
+#
+sub zero_pad()
+{
+  my $diff = abs (length($_[0]) - length($_[1]));
+  return unless ($diff);
+  if (length($_[0]) > length($_[1]))
+  {
+    while ($diff)
+    {
+      $_[1] .= "0";
+      $diff--;
+    }
+  }
+  else
+  {
+    while ($diff)
+    {
+      $_[0] .= "0";
+      $diff--;
+    }
+  }
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: ep_cull
+#  Purpose: Remove endpoints from endpoint manager and inventory databases.
+#  Returns: 0 ..... endpoint was not deleted
+#           1 ..... endpoint was deleted only from inv database
+#           2 ..... endpoint was deleted only from epmgr database
+#           3 ..... endpoint was deleted from both inv and epmgr databases
+#
+sub ep_cull()
+{
+  my $href = shift;
+  my $ep_label = ${$href}{'label'};
+  my $rc_inv;
+  my $rc_epmgr;
+
+  if ($opt_status)
+  {
+      my $cmd = "wep $ep_label status";
+      &msg($cmd);
+      my $result = `$cmd 2>&1`;
+      return 0 if ($? == 0);        # Do not cull if command successful
+  }
+
+  if ($opt_inv)
+  {
+      my $cmd = "wrminvnode $ep_label";
+      &msg($cmd);
+      $rc_inv = &run($cmd);
+  }
+
+  if ($opt_epmgr)
+  {
+      $cmd = "wdelep $ep_label";
+      &msg($cmd);
+      $rc_epmgr = &run($cmd);
+  }
+
+  if ($opt_inv and not $opt_epmgr)
+  {
+    return 1 if ($rc_inv == 0);
+  }
+  elsif ($opt_epmgr and not $opt_inv)
+  {
+    return 2 if ($rc_epmgr == 0);
+  }
+  elsif ($opt_epmgr and $opt_inv)
+  {
+    return 3 if (($rc_epmgr == 0) and ($rc_inv == 0));
+  }
+  else
+  {
+    return 0;
+  }
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: msg
+#    Notes: Print a message if the verbose flag is set
+#
+sub msg()
+{
+    print "..... ", shift, "\n" if ($opt_verbose);
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: err
+#    Notes: Print an error message if the verbose flag is set
+#
+sub err()
+{
+    print "====> ", shift, "\n" if ($opt_verbose);
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: run
+#  Globals: @failed
+#  Returns: Return code of executed command
+#    Notes: Assumes the command to be run returns 0 for success
+#           or something else on failure.
+sub run()
+{
+  my $cmd = shift;
+  my $err = `$cmd 2>&1`;
+  my $rc = $?;
+  if ($rc != 0)
+  {
+    my $i = $#failed + 1;                     # Index last array entry
+    $failed[$i]->{'cmd'} = $cmd;
+    $failed[$i]->{'err'} = $err if ($err);
+    $failed[$i]->{'syserr'} = $! if ($!);
+  }
+  return $rc;
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: summary
+#  Globals: @failed
+#    Notes: Prints out a summary of failed commands
+#
+sub summary()
+{
+  return if ($#failed < 0);
+  &err("Summary of failed commands");
+  for my $href (@failed)
+  {
+    &err($href->{'cmd'});
+    &err("..... system error: " . $href->{'syserr'}) if ($href->{'syserr'});
+    &err("..... program error: " . $href->{'err'}) if ($href->{'err'});
+  }
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: trim
+#  Returns: nothing
+#  Purpose: Trim white space from the front and back of each argument
+#
+sub trim()
+{
+  local $_;
+  for $_ (@_)
+  {
+    s/^\s*(.*?)\s*$/$1/;         # Trim white space front and back
+  }
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: usage
+#  Globals: $synopsis
+#  Returns: 2
+#
+sub usage()
+{
+  my $msg = shift;
+  print STDERR "\nUSAGE: ";
+  print STDERR $msg if ($msg);
+  print STDERR "\n";
+  print STDERR $synopsis;
+  exit(2);
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+#------------------------------------------------------------------------------
+
+__END__
+
+=head1 NAME
+
+  mepau - Mark's tivoli EndPoint AUdit tool
+
+=head1 SYNOPSIS
+
+  mepau {--pod|--help|--version}
+
+  mepau --last-login-time     { [<>]days|not_yet_set }
+        --last-migration-time { [<>]days|not_yet_set }
+        --last-method-time    { [<>]days|not_yet_set }
+        --interp                [!]type               
+        --revision              [<!>]rev
+        --label                 label
+        --dump file
+        --load file
+        --cull [--noinv|--noepmgr|-nosummary|-nostatus]
+        --noverbose
+
+=head1 DESCRIPTION
+
+  This script assists in the management of tivoli endpoints.
+
+  The tivoli command "wep 'ep_label'" provides useful information about
+  each endpoint in a tivoli environment.  By selectively examining the
+  "last login", "last migration" and "last method" times, as well as
+  an endpoints "interpreter type", "version" and "label" tivoli admins
+  can gain a better understanding of the environment they manage.
+
+  The script is essentially controlled via options which can be
+  grouped into three categories.  Options that control where the
+  script reads (--load) and writes (--dump) endpoint data.  Options
+  that select an endpoint based on some criteria such as the "last
+  login time" and/or "label" and finally, options that control what
+  action is to be performed on the selected endpoints.
+
+  The default action is to output a list of endpoints which match the
+  all the specified selectors however the endpoints in question can
+  also be culled (--cull).
+
+  In the absence of the "--load" option endpoint data is gathered by
+  executing the tivoli command "wgetinstall Endpoint".  Then for each
+  endpoint the command "wep 'ep_label'" is executed to retrieve
+  endpoint details.
+
+  In Tivoli Management Regions containing thousands of endpoints the
+  process of gathering data can take several hours or more.  Because
+  of this, the "--dump" and "--load" options allow endpoint data to be
+  dumped and loaded both to and from text files.
+
+  The selector options cause the script to print a list of endpoints
+  matching the criteria specified.  When several options are specified
+  all must match for an endpoint to be selected.
+
+  The "--cull" option modifies the default action of the script.  It
+  causes the selected endpoints to be deleted from both the tivoli
+  inventory and endpoint manager databases.
+
+  It is possible to restrict culling to either one or the other
+  database by using the "--noepmgr" or "--noinv" option.
+
+  If you are the cautious type, then you would probably want to try to
+  first delete the endpoint from the inventory database before
+  deleting it from the endpoint manager database.
+
+  Following an endpoint cull a summary of failures is printed out by
+  default.  It is probably a good idea to try and find out why the
+  commands failed as this might point towards inconsistencies between
+  the endpoint manager and inventory databases.
+
+  (Of course, not that there would be any in the environments under
+  your management ;-)
+
+  On the other hand you may not care to know.  If you are in this
+  category feel free to use the "--nosummary" option.
+
+=head1 OPTIONS
+
+=over
+
+=item  --pod
+
+  Execute "perldoc" to print out this documentation.
+
+=item  --help
+
+  Print a short synopsis of options
+
+=item  --version
+
+  Print script version and exit.
+
+=item  --last-login-time [<>]days | not_yet_set
+
+  Select endpoints based on last login time.  The days option may be
+  absolute or may be prefixed with a less than (<) or greater than (>)
+  character.  The time may also be the string "not_yet_set".
+  
+
+=item  --last-migration-time [<>]days | not_yet_set
+
+  Select endpoints based on last migration time.  The days option may
+  be absolute or may be prefixed with a less than (<) or greater than
+  (>) character.  The time may also be the string "not_yet_set".
+
+=item  --last-method-time [<>]days | not_yet_set
+
+  Select endpoints based on last method time.  The days option may be
+  absolute or may be prefixed with a less than (<) or greater than (>)
+  character.  The time may also be the string "not_yet_set".
+
+=item --interp [!]type
+
+  Select endpoints with the given interpreter type.  If the type is
+  prefixed with an exclamation (!) character then all types are
+  considered except for the one provided.
+
+=item  --revision [<!>]rev
+
+  Select endpoints based on their revision level.  The revision level
+  may be absolute or prefixed with a less than (<),  greater than (>)
+  or not equal to (!) character.
+
+=item  --label label
+
+  Select endpoints based on their label.  The label is evaluated
+  as a perl regular expression so something like 'w.*' would
+  match all endpoints whose label begins with 'w'.
+
+  NOTE:  Beware of shells that interpret '*', '?' and '\' chars
+         before feeding the arguments to this script.  If in doubt
+         always use 'quotes' and remember some shells interpret
+         the '\' character inside single 'quotes' so you will need
+         to do something like '\\w' in order to preserve them.
+
+=item  --dump file
+
+  Dump endpoint data to the specified text file.  This data can be
+  read later by using the "--load" option.
+
+=item  --load file
+
+  Read endpoint data from the specified text file.  It should consist
+  of one or more entries corresponding to the output of the tivoli
+  command "wep 'ep_label'".
+
+=item  --cull
+
+  Delete the selected endpoint(s) from both the endpoint manager and
+  inventory databases.
+
+=item  --noinv
+
+  When culling do not delete the endpoint from the inventory database.
+
+=item --noepmgr
+
+  When culling do not delete the endpoint from the endpoint manager
+  database.
+
+=item  --nosummary
+
+ After culling do not print a summary of the commands that failed.
+ (An option for the happy-go-lucky people in this world ;-))
+
+=item  --nostatus
+
+  Do not check if the endpoint is available before culling.  This
+  is useful if you want to avoid having to wait for status checks
+  to time out.  Only use if you are sure that the selected
+  endpoints should be culled.
+
+=item  --noverbose
+
+  This option has different effects depending on action context. When
+  culling do not print out the commands executed and, when printing
+  selected endpoints, do not do not print out the values of selectors
+  that matched.
+
+=back
+
+=head1 TUTORIAL
+
+  By default mepau collects endpoints from the endpoint manager
+  database and prints out the labels of all gathered endpoints.  So
+  the following command is really just a slow way of executing
+  "wgetallinst Endpoint":
+
+    mepau
+
+  However when mepau gathers details about endpoints it does so by
+  executing "wep 'ep_label'" and this information can be queried by
+  selector options.  For instance if you wanted to find which
+  endpoints have a code revision less than 37113 you could run:
+
+    mepau --revision \<37113
+
+  Note that the '\' character is used to protect the '<' character
+  from interpretation by the shell.  You could also protect it by
+  surrounding it with single 'quotes' or double "quotes".
+
+  Now the first thing you will probably notice is that it takes a
+  looong time for mepau to run "wep 'ep_label'" on all endpoints in
+  the endpoint manager database.  This feature is courtesy of the
+  "incredibly fast" (well, not really) tivoli database.
+
+  So before you query the endpoint data it is advisable to dump the
+  information to a file:
+
+    mepau --dump wep.data
+
+  While mepau is querying the endpoint manager database it will print
+  a '.' for every ten entries read.  After a while it gets boring
+  watching it print dots so, to help you plan your coffee break, 5000
+  endpoint entries takes around 45 minutes to dump and the
+  corresponding file created will be around around 4MB in size.
+
+  Of course having the endpoint data in a text file is not very
+  helpful if you can't do anything with it.  So in order to process
+  the data use the following option:
+
+    mepau --load wep.data
+
+  With this option mepau will read endpoint data from the file and not
+  bother to query the endpoint manager database.
+
+  You will notice that reading from the text file is much quicker than
+  querying the tivoli database.  There may be good reasons for this
+  but we will not explore them here.
+
+  The main reason mepau was developed was to provide an automated way
+  of removing either dead or old endpoint objects based on their
+  last_login_time.  Thus one could simply run:
+
+    mepau --load wep.data --last-login-time \>120 --cull
+
+  The above command deletes all endpoints whose last_login_time is
+  greater than 120 days old.  Horrors, you may indeed say, but culling
+  disfunctional endpoint objects speeds up inventory scans, software
+  distributions and anything else that depends on lists of endpoint
+  targets.
+
+  Note also that the cull option is a little bit cleverer than it's
+  name suggests.  Before removing the endpoint it checks it's status
+  with "wep 'ep_label' status".  If the endpoint is up it bails out
+  and moves on to the next candidate.
+
+  Also, by default, cull will try to delete the endpoint from both the
+  inventory and endpoint manager databases.  It also prints a summary
+  of which commands (wrminvnode, wdelep) failed when finished.
+
+  So if you are the cautious type you will execute
+  something like:
+
+    mepau --load wep.data --last-login \>120 --cull --noepmgr
+
+  This causes wrminvnode to be executed for all endpoints whose
+  last_login_time is greater than 120 days.  Note also that the
+  options can be shortened (--last-login).  If options become
+  ambiguous mepau will complain.
+
+  Having purged the inventory database get rid of the endpoints.
+  This causes the endpoints to be deleted only from the endpoint
+  manager database:
+
+    mepau --load wep.data --last-login \>120 --cull --noinv
+
+  Note that in both of the above cases as status check is performed
+  before either "wrminvnode" or "wdelep" is run.  The status check
+  usually takes over a minute to time out if the endpoint is down.  As
+  this can significantly delay overall execution time an option was
+  added to bypass this check:
+
+    mepau --load wep.data --last-login \>120 --cull --nostatus
+
+  Use the "--nostatus" option if you are sure that the endpoints you
+  wish to cull really are dead and gone.  Note also that the above
+  command will try to delete the endpoints from both inventory and
+  endpoint manager databases.
+
+  Here are some other groovy things that you can do as well:
+
+    mepau --load wep.data --dump wep-gt60.data --last-login \>60 
+
+  As the above command demonstrates, you can use a selector to dump
+  all endpoints whose last_login_time is greater than 60 days.  Note
+  that when culling, only endpoints that were not removed from the
+  endpoint manager database will be dumped:
+
+    mepau --load wep.data --dump wep-gt60-not-culled.data \
+            --last-login \>60 --cull
+
+  Find out how many windows endpoints there are:
+
+    mepau --load wep.data --interp w32-ix86 | wc -l
+
+  Find out how many endpoints other than windows there are:
+
+    mepau --load wep.data --interp \!w32-ix86 | wc -l
+
+  List all endpoints which are not at code revision 37113:
+
+    mepau --load wep.data --revision \!37113
+
+  Cull all windows endpoints who last logged in over 100 days ago:
+
+    mepau --load wep.data --interp w32-ix86 --last-login \>100 --cull
+
+  List all endpoints whose label begins with 'w':
+
+    mepau --load wep.data --label '^w'
+
+=head1 SEE ALSO
+
+  perl, sh, env, wgetallinst, wep, wrminvnode, wdelep
+
+=head1 TODO
+
+  Sure to be something down the track
+  
+=head1 AUTHOR
+
+  Mark Matthews
+
+=head1 RCS ID
+  
+  $Id: mepau,v 1.3 2005/03/17 04:28:55 u359657 Exp $
+
+=cut
+

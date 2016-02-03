@@ -1,0 +1,234 @@
+#!/usr/bin/perl
+#==============================================================================
+# NOTE:  To view documentation run script with the "--pod" option or
+#        do it yourself by running "perldoc 'path_to_this_script'"
+#
+# LICENSE
+#   Copyright (C) 2006-2010 Mark Matthews
+#   Distributed under the terms of the GNU General Public License
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#    
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#    
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#------------------------------------------------------------------------------
+#==============================================================================
+# Modules
+#
+use Getopt::Long;
+#------------------------------------------------------------------------------
+#==============================================================================
+# Globals
+#
+$main::VERSION =  substr('$Revision: 1.4 $', 11, -2);
+$synopsis = <<"EOS";
+
+  itmsetSit {--pod|--help|--version}
+
+  itmsetSit [options]
+
+    Where valid option(s) are:
+      -t|--type situation_type            
+      -d|--distrib distribution_list
+
+EOS
+
+$| = 1;                          # Flush io buffer after each read or write
+#------------------------------------------------------------------------------
+#==============================================================================
+# Process command line arguments
+#
+$opt_pod = 0;
+$opt_help = 0;
+$opt_version = 0;
+$opt_type = 0;
+$opt_distrib = 0;
+
+&usage unless GetOptions(
+                                      "t|type=s", \$opt_type,
+                                   "d|distrib=s", \$opt_distrib,
+                                           "pod", \$opt_pod,
+                                        "help|?", \$opt_help,
+                                     "version|V", \$opt_version,
+                         );
+
+if ($opt_help)
+{
+  print $synopsis;
+  exit (0);
+}
+
+if ($opt_pod)
+{
+  exit(system("perldoc", "-t", $0));
+}
+
+if ($opt_version)
+{
+  print "(", $0, ")", " ", $main::VERSION, "\n";
+  exit (0);
+}
+
+
+&usage("Missing mandatory option: type") unless ($opt_type);
+
+#------------------------------------------------------------------------------
+#==============================================================================
+# Main
+#
+$cmd = "tacmd listSit -d ',' -n |";
+
+open (SIT, $cmd) or die "Unable to execute: '$cmd':$!\n";
+
+@sit = ();
+
+while (<SIT>)
+{
+  my($sit, $type) = split(',', $_, 2);
+
+  &trim($sit);
+  
+  if ($sit && $type =~ /$opt_type/)
+  {
+    push (@sit, $sit);
+  }
+}
+
+
+foreach (@sit)
+{
+  if ($opt_distrib)
+  {
+    my ($distrib) = "" if ($opt_distrib eq "*CLEAR*");
+    
+    my ($cmd) =  "tacmd editSit --situation '$_' --property Distribution='$distrib' --force";
+
+    print $cmd, "\n";
+    system ($cmd);
+
+  }
+
+}
+
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: trim
+#  Returns: nothing
+#  Purpose: Trim white space from the front and back of each argument
+#
+sub trim()
+{
+  local $_;
+  for $_ (@_)
+  {
+    s/^\s*(.*?)\s*$/$1/;         # Trim white space front and back
+  }
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+# Function: usage
+#  Globals: $synopsis
+#  Returns: 2
+#
+sub usage()
+{
+  my $msg = shift;
+  print STDERR "\nUSAGE: ";
+  print STDERR $msg if ($msg);
+  print STDERR "\n";
+  print STDERR $synopsis;
+  exit(2);
+}
+#------------------------------------------------------------------------------
+#==============================================================================
+#
+#------------------------------------------------------------------------------
+
+__END__
+
+=head1 NAME
+
+  itmsetSit
+
+=head1 SYNOPSIS
+
+  itmsetSit {--pod|--help|--version}
+
+  itmsetSit [options]
+
+    Where valid option(s) are:
+      -t|--type situation_type
+      -d|--distrib distribution_list
+
+
+=head1 DESCRIPTION
+
+  Set the distribution list for all situations of a given type.
+ 
+  Useful for clearing the default distribution lists assigned to 
+  situations during the initial installation.   
+    
+
+=head1 OPTIONS
+
+=over
+
+=item  --pod
+
+  Execute "perldoc" to print out this documentation.
+
+=item  --help
+
+  Print a short synopsis of options
+
+=item  --version
+
+  Print script version and exit.
+
+=item  --type situation_type
+
+  Specify the the type of the situations for which the set action
+  is to be performed.  The action will be performed on all 
+  situations of that type.
+
+
+=item --distrib distribution_list
+
+  Assign the specified distribution list to all situations of the
+  type indicated by the --type option.  The special distribution
+  list "*CLEAR*" can be used to clear the distribution list.
+
+=back
+
+=head1 TUTORIAL
+
+  Clear the distribution list for all situations which have 
+  the "AIX Premium" type:
+
+    itmsetSit -t "AIX Premium" -d "*CLEAR*"
+
+=head1 SEE ALSO
+
+  perl, tacmd listSit
+
+=head1 TODO
+
+  Sure to be something down the track
+  
+=head1 AUTHOR
+
+  Mark Matthews
+
+=head1 REVISION
+  
+  $Id:  $
+
+=cut
